@@ -303,7 +303,7 @@
     <p id="friendStatus" role="status" aria-live="polite">Create a room and invite one friend.</p>
     <label for="friendLink" class="note">Your private room invite</label><input id="friendLink" readonly aria-label="Room invite link" value="">
     <div class="friend-rows"><button id="friendCopy" type="button" class="cta ghost" disabled>Copy invite</button><button id="friendReady" type="button" class="cta" disabled>Ready to run</button></div>
-    <p class="note">Two Genies. Six lanes. Run together. If either Genie clashes, both stop—then challenge each other to a rematch.<br><small>Multiplayer build: realtime-3</small></p>
+    <p class="note">Race your friend! Each clash sets you back 12 meters. Fall 36 meters behind and your friend wins. Keep dodging to stay in the race.<br><small>Multiplayer build: race-4</small></p>
     <button id="friendLeave" type="button" class="cta ghost">Leave room</button>
   </section>
   <aside id="genieBanter" class="genie-banter" role="status" aria-live="polite" aria-atomic="true" hidden>
@@ -1710,11 +1710,7 @@
       G.y < type.bottom + type.height - 0.06 && playerTop > type.bottom + 0.06;
   }
   function endRun(type) {
-    if(MP.active&&!MP.applying){
-      if(MP.collisionRound===MP.round)return;
-      const hit=Math.max(0,hazardTypes.indexOf(type));MP.pendingHit=hit;MP.collisionRound=MP.round;
-      mpSendEvent({kind:'clash',hit});mpShowClash(hit,MP.role);mpPersistClash();return;
-    }
+    if(MP.active&&!MP.applying){mpRaceHit(Math.max(0,hazardTypes.indexOf(type)));return;}
     state = 'over'; speed = 0; G.runBlend = 0; Sound.bump(); Sound.setRun(0, false);
     shake = 0.3; hideHint(); ui.pauseBtn.hidden = true;
     commentTimer=0; $('#genieComment').classList.remove('is-on');
@@ -1744,8 +1740,9 @@
       const previousZ = o.root.position.z;
       o.root.position.z += dz;
       // Swept depth check also catches collisions on slower devices.
-      if (checkHits && !o.passed && previousZ < 0.8 && o.root.position.z > -0.8 && obstacleHit(o)) {
-        endRun(hazardTypes[o.typeIndex]);return;
+      if (checkHits && !(MP.active&&MP.hitGrace>0) && !o.passed && previousZ < 0.8 && o.root.position.z > -0.8 && obstacleHit(o)) {
+        if(MP.active){o.passed=true;mpRaceHit(o.typeIndex);}
+        else {endRun(hazardTypes[o.typeIndex]);return;}
       }
       if (!o.passed && o.root.position.z > 0.8) {
         o.passed = true; cleared++;
@@ -2035,7 +2032,7 @@
       speed = BASE_SPEED * ease(clamp((transT - 0.3) / 1.0, 0, 1));
       if (transT >= 1.35) state = 'running';
     } else if (state === 'running') {
-      speed = damp(speed, milestoneSpeed(distance), 1.5, dt);
+      speed = damp(speed, milestoneSpeed(distance+(MP.active?Math.max(0,(MP.selfPenalty||0)-(MP.setbackLeft||0)):0)), 1.5, dt);
     }
     const active = state === 'running' || state === 'transition';
     if (active) updatePlayer(dt);
@@ -2270,7 +2267,7 @@
     $('#friendBadge').textContent='TOGETHER · YOU '+(side<0?'LEFT':'RIGHT')+' · FRIEND '+(side<0?'RIGHT':'LEFT');
   }
   function mpWorldSnapshot() {
-    const p={distance,speed,x:G.x,y:G.y,phase:G.phase,slide:G.slide,run:G.runBlend,pitch:genie.body.rotation.x,rotation:genie.root.rotation.y,grounded:G.grounded,score:STYLE.score,lane:G.lane,vx:G.vx,vy:G.vy,slideT:G.slideT};
+    const p={distance,speed,racePenalty:MP.selfPenalty||0,setbackLeft:MP.setbackLeft||0,x:G.x,y:G.y,phase:G.phase,slide:G.slide,run:G.runBlend,pitch:genie.body.rotation.x,rotation:genie.root.rotation.y,grounded:G.grounded,score:STYLE.score,lane:G.lane,vx:G.vx,vy:G.vy,slideT:G.slideT};
     if(MP.role==='host')Object.assign(p,{distance,speed,wave,spawnAt,obstacles:obstacles.flatMap((o,i)=>o.active?[[i,o.typeIndex,o.lane,o.root.position.z,o.netSerial||0]]:[])});
     return p;
   }
@@ -2290,12 +2287,14 @@
       if(!MP.active||MP.pc!==pc||typeof e.data!=='string'||e.data.length>14000)return;
       let packet;try{packet=JSON.parse(e.data);}catch(_){return;}
       if(packet.round!==MP.round)return;
-      if(packet.kind==='clash'&&MP.phase!=='over'&&Number.isInteger(packet.hit)&&packet.hit>=0&&packet.hit<hazardTypes.length&&MP.started){
-        const who=MP.role==='host'?'guest':'host';mpShowClash(packet.hit,who);return;
+      if(packet.kind==='hit'&&MP.phase!=='over'&&MP.started&&Number.isFinite(packet.penalty)&&packet.penalty>=0&&packet.penalty<=1e9){
+        if(packet.penalty>(MP.friendPenalty||0)){MP.friendPenalty=packet.penalty;MP.notice='FRIEND CLASHED! KEEP GOING';MP.noticeT=2;}
+        return;
       }
       if(packet.kind!=='pose'||!MP.started||!Number.isSafeInteger(packet.seq)||packet.seq<=MP.peerSeq)return;
       const r=packet.state;
       if(!r||!['x','y','phase','slide','run','pitch','rotation','score','lane','vx','vy','slideT','distance','speed'].every(k=>Number.isFinite(r[k]))||Math.abs(r.x)>5||r.y<0||r.y>20||Math.abs(r.vx)>100||Math.abs(r.vy)>100)return;
+      if(Number.isFinite(r.racePenalty)&&r.racePenalty>=0&&r.racePenalty<=1e9)MP.friendPenalty=Math.max(MP.friendPenalty||0,r.racePenalty);
       MP.peerSeq=packet.seq;MP.peerLast=performance.now();MP.remote=r;MP.receivedAt=MP.peerLast;
       MP.remoteAge=Number.isFinite(packet.at)?clamp((Date.now()+MP.clockOffset-packet.at)/1000,0,.2):0;
       if(MP.role==='guest')MP.peerWorld={round:MP.round,state:r};
@@ -2347,23 +2346,45 @@
     MP.peerSendAt=now+50;
     try{channel.send(JSON.stringify({kind:'pose',round:MP.round,seq:++MP.poseSeq,at:Date.now()+MP.clockOffset,state:mpWorldSnapshot()}));}catch(_){}
   }
-  async function mpPersistClash() {
-    if(!MP.active||MP.pendingHit===null||MP.persisting)return;
-    const hit=MP.pendingHit,round=MP.round,generation=MP.generation;MP.persisting=true;
+  const RACE_SETBACK=12,RACE_LOSE_GAP=36;
+  function mpRaceReset() {
+    MP.selfPenalty=0;MP.friendPenalty=0;MP.setbackLeft=0;MP.hitGrace=0;MP.hitEvent=0;MP.hitQueue=[];
+    MP.race=null;MP.notice='';MP.noticeT=0;MP.otherZ=0;
+    if(MP.otherGenie)MP.otherGenie.root.position.z=0;if(MP.otherShadow)MP.otherShadow.position.z=0;
+  }
+  function mpRaceSync(race) {
+    if(!race)return;
+    const mine=MP.role==='host'?'host':'guest',friend=MP.role==='host'?'guest':'host';
+    MP.race=race;MP.selfPenalty=Math.max(MP.selfPenalty||0,race[mine+'Penalty']||0);
+    MP.friendPenalty=Math.max(MP.friendPenalty||0,race[friend+'Penalty']||0);
+    MP.hitEvent=Math.max(MP.hitEvent||0,race[mine+'Event']||0);
+    MP.hitQueue=(MP.hitQueue||[]).filter(event=>event.event>(race[mine+'Event']||0));
+  }
+  function mpRaceHit(hit) {
+    if(!MP.active||!MP.started||MP.phase==='over'||state==='over'||MP.hitGrace>0)return;
+    MP.hitGrace=2;MP.selfPenalty+=RACE_SETBACK;MP.setbackLeft+=RACE_SETBACK;
+    STYLE.chain=0;STYLE.timer=0;syncStyle();Sound.bump();shake=Math.max(shake,.22);
+    MP.notice='CLASH! −12 m';MP.noticeT=2;
+    const event={event:++MP.hitEvent,hit,round:MP.round};MP.hitQueue.push(event);
+    mpSendEvent({kind:'hit',...event,penalty:MP.selfPenalty});mpPersistHits();
+  }
+  async function mpPersistHits() {
+    if(!MP.active||!MP.hitQueue?.length||MP.persisting)return;
+    const event=MP.hitQueue[0],generation=MP.generation;MP.persisting=true;
     try {
-      const data=await mpFetch('end',{hit,round});
-      if(MP.active&&MP.generation===generation&&MP.round===round){mpApply(data);if(data.phase==='over')MP.pendingHit=null;}
+      const data=await mpFetch('hit',event);
+      if(MP.active&&MP.generation===generation&&event.round===MP.round)mpApply(data);
     }catch(_){}finally{MP.persisting=false;}
   }
-  function mpShowClash(hit,who) {
-    if(!MP.active||!MP.started)return;
-    if(state!=='over'){MP.applying=true;endRun(hazardTypes[hit]||hazardTypes[0]);MP.applying=false;}
-    MP.collisionRound=MP.round;MP.clashBy=who;mpBanterReset();hidePanel($('#friendPanel'));hidePanel(ui.pause);
-    const mine=who===MP.role;
-    $('#overTitle').textContent=mine?'You clashed!':'Your friend clashed!';
-    $('#overText').textContent=(mine?'Your Genie':'Your friend’s Genie')+' hit “'+(hazardTypes[hit]||hazardTypes[0]).name+'”. Both runners stopped. '+(mine?'The obstacle would like its personal space back.':'Your Genie: “I was saving that obstacle for you!”');
-    $('#retryBtn').textContent=MP.pendingHit!==null?'Saving clash…':'Run together again';
-    $('#retryBtn').disabled=MP.pendingHit!==null||MP.phase!=='over';
+  function mpShowRaceResult(race) {
+    if(!race||!['host','guest'].includes(race.winner))return;
+    if(state!=='over'){MP.applying=true;endRun(hazardTypes[race.lastHit]||hazardTypes[0]);MP.applying=false;}
+    mpBanterReset();hidePanel($('#friendPanel'));hidePanel(ui.pause);
+    const won=race.winner===MP.role;
+    $('#overTitle').textContent=won?'You win!':'Your friend wins!';
+    $('#overText').textContent=won?'You pulled 36 meters ahead. Your Genie: “That cape is aerodynamic. Those dodges? Even better.”':'You fell 36 meters behind. Your Genie: “That was a warm-up. Rematch?”';
+    $('#overStats').textContent='Final lead: '+Math.abs(race.hostPenalty-race.guestPenalty)+' m · Your clashes: '+Math.round((MP.role==='host'?race.hostPenalty:race.guestPenalty)/RACE_SETBACK)+' · Friend’s clashes: '+Math.round((MP.role==='host'?race.guestPenalty:race.hostPenalty)/RACE_SETBACK);
+    $('#retryBtn').textContent='Race again';$('#retryBtn').disabled=false;
   }
 
   function mpSaveSession() { try{sessionStorage.setItem('genie-room',JSON.stringify({room:MP.room,token:MP.token,role:MP.role}));}catch(_){} }
@@ -2378,6 +2399,7 @@
   }
   function mpApply(data) {
     if(!MP.active)return;
+    if(data.round<MP.round||(data.round===MP.round&&MP.phase==='over'&&data.phase!=='over'))return;
     MP.role=data.role; MP.seed=data.seed; MP.latest=data; MP.lastOK=performance.now();
     if((!MP.peerLast||performance.now()-MP.peerLast>1000)&&(data.otherSeq===undefined||data.otherSeq!==MP.remoteSeq)){
       MP.remote=data.other;MP.remoteSeq=data.otherSeq;MP.receivedAt=performance.now();
@@ -2385,12 +2407,11 @@
     }
     if(data.phase==='closed'){$('#friendBadge').textContent='FRIEND LEFT · KEEP RUNNING OR LEAVE';MP.roomClosed=true;return;}
     if(data.round!==MP.round) {
-      MP.round=data.round; MP.started=false; MP.serial=0; MP.lastWorldSeq=-1;MP.collisionRound=null;MP.pendingHit=null;MP.peerSeq=-1;MP.peerLast=0;MP.peerWorld=null;MP.remote=null;MP.remoteSeq=undefined;MP.remoteAge=0;mpBanterReset();
+      MP.round=data.round; MP.started=false; MP.serial=0; MP.lastWorldSeq=-1;mpRaceReset();MP.peerSeq=-1;MP.peerLast=0;MP.peerWorld=null;MP.remote=null;MP.remoteSeq=undefined;MP.remoteAge=0;mpBanterReset();
       MP.applying=true; state='intro'; resetRun(); hidePanel(ui.start); hidePanel(ui.pause); hidePanel($('#overPanel')); MP.applying=false;
       MP.otherG={...G}; MP.otherGenie.root.rotation.y=0; obstacles.forEach(o=>o.netSerial=-1);
     }
-    MP.phase=data.phase;mpPeerSignal(data);
-    if(MP.collisionRound===MP.round&&data.phase!=='over'){mpPersistClash();return;}
+    MP.phase=data.phase;mpRaceSync(data.race);mpPeerSignal(data);
     if(data.phase==='waiting'||data.phase==='countdown') {
       if(!MP.started)showPanel($('#friendPanel')); else hidePanel($('#friendPanel')); $('#friendReady').disabled=data.phase==='countdown'||(MP.role==='host'?data.hostReady:data.guestReady);
       $('#friendReady').textContent=(MP.role==='host'?data.hostReady:data.guestReady)?'You’re ready':'Ready to run';
@@ -2406,9 +2427,9 @@
       MP.applying=true;resumeGame();MP.applying=false;
     } else if(data.phase==='over') {
       if(!MP.started)mpStartRound();
-      MP.pendingHit=null;mpShowClash(data.hit,data.hitBy||MP.clashBy||MP.role);
+      mpShowRaceResult(data.race);
     }
-    if(data.phase==='over'){$('#retryBtn').textContent=(MP.role==='host'?data.hostReady:data.guestReady)?'Waiting for friend…':'Run together again';$('#retryBtn').disabled=!!(MP.role==='host'?data.hostReady:data.guestReady);}
+    if(data.phase==='over'){$('#retryBtn').textContent=(MP.role==='host'?data.hostReady:data.guestReady)?'Waiting for friend…':'Race again';$('#retryBtn').disabled=!!(MP.role==='host'?data.hostReady:data.guestReady);}
   }
   function mpCommand(action,extra={}) {
     const generation=MP.generation, commandRound=MP.round;
@@ -2429,7 +2450,7 @@
   async function mpPoll() {
     if(!MP.active)return;
     const generation=MP.generation;
-    if(MP.pendingHit!==null)mpPersistClash();
+    mpPersistHits();
     await mpCommand('sync');
     if(MP.active&&!MP.roomClosed&&generation===MP.generation)
       MP.pollTimer=setTimeout(mpPoll,MP.poseChannel&&MP.poseChannel.readyState==='open'?1000:(MP.started&&MP.phase==='running'?80:400));
@@ -2439,7 +2460,7 @@
     if(MP.active)return;
     hidePanel(ui.start);showPanel($('#friendPanel'));mpStatus(room?'Joining your friend…':'Creating your room…');
     $('#friendReady').disabled=true;$('#friendCopy').disabled=true;
-    MP.active=true;MP.generation++;MP.seq=0;MP.round=0;MP.started=false;MP.pendingHit=null;MP.remoteSeq=undefined;MP.remoteAge=0;MP.collisionRound=null;MP.roomClosed=false;MP.poseSeq=0;MP.peerSession=crypto.randomUUID();MP.peerSeq=-1;MP.peerLast=0;
+    MP.active=true;mpRaceReset();MP.generation++;MP.seq=0;MP.round=0;MP.started=false;MP.pendingHit=null;MP.remoteSeq=undefined;MP.remoteAge=0;MP.collisionRound=null;MP.roomClosed=false;MP.poseSeq=0;MP.peerSession=crypto.randomUUID();MP.peerSeq=-1;MP.peerLast=0;
     MP.pending=true;const generation=MP.generation;
     try {
       let saved;try{saved=JSON.parse(sessionStorage.getItem('genie-room')||'null');}catch(_){}
@@ -2447,7 +2468,7 @@
       if(room&&saved&&saved.room===room) {Object.assign(MP,saved);data=await mpFetch('sync');}
       else {MP.room=room;MP.token=null;data=await mpFetch(room?'join':'create');MP.token=data.token;MP.room=data.room;MP.role=data.role;}
       if(generation!==MP.generation||!MP.active)return;
-      if(data.protocol!=='realtime-3')throw new Error('This server needs the realtime-3 update. Deploy the matching lib/rooms.js file.');
+      if(data.protocol!=='race-4')throw new Error('This server needs the race-4 update. Deploy the matching lib/rooms.js file.');
       MP.iceServers=data.iceServers;MP.seq=Math.max(MP.seq,data.selfSeq||0);
       mpLayout(true);mpSaveSession();
       history.replaceState(null,'',location.pathname+'#room='+MP.room);
@@ -2458,7 +2479,7 @@
   }
   function mpReady(){if(MP.active&&(MP.phase==='waiting'||MP.phase==='over')){$('#friendReady').disabled=true;mpCommand('ready');}}
   function mpLeave(notify=true) {
-    mpPeerClose();mpBanterReset();
+    mpPeerClose();mpBanterReset();mpRaceReset();
     if(notify&&MP.active)fetch('/api/room',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'leave',room:MP.room,token:MP.token,round:MP.round}),keepalive:true}).catch(()=>{});
     MP.active=false;MP.generation++;clearTimeout(MP.pollTimer);MP.pending=false;MP.phase='';MP.pendingHit=null;MP.remote=null;MP.started=false;
     try{sessionStorage.removeItem('genie-room');}catch(_){}
@@ -2481,15 +2502,24 @@
     return ((n^(n>>>16))>>>0)/4294967296;
   }
   function mpAdjustDistance(dz,dt) {
-    if(!MP.active||MP.role!=='guest'||!MP.remote||MP.phase!=='running')return dz;
-    const age=(MP.remoteAge||0)+(performance.now()-MP.receivedAt+(MP.peerLast&&performance.now()-MP.peerLast<1000?0:MP.rtt/2))/1000;
-    // Stop chasing stale snapshots. A delayed packet must never jerk the road.
-    if(age>2)return dz;
-    const target=MP.remote.distance+MP.remote.speed*age;
-    return dz+clamp((target-distance)*.6*dt,-dz*.08,dz*.08);
+    if(!MP.active)return dz;
+    MP.hitGrace=Math.max(0,(MP.hitGrace||0)-dt);MP.noticeT=Math.max(0,(MP.noticeT||0)-dt);
+    let correction=0;
+    if(MP.role==='guest'&&MP.remote&&MP.phase==='running') {
+      const age=(MP.remoteAge||0)+(performance.now()-MP.receivedAt+(MP.peerLast&&performance.now()-MP.peerLast<1000?0:MP.rtt/2))/1000;
+      if(age<=2){
+        const remoteServed=Math.max(0,(MP.remote.racePenalty||0)-(MP.remote.setbackLeft||0));
+        const localServed=Math.max(0,(MP.selfPenalty||0)-(MP.setbackLeft||0));
+        const target=MP.remote.distance+MP.remote.speed*age+remoteServed-localServed;
+        correction=clamp((target-distance)*.6*dt,-dz*.08,dz*.08);
+      }
+    }
+    const setback=Math.min(MP.setbackLeft||0,Math.max(0,dz+correction)*.8);
+    MP.setbackLeft=Math.max(0,(MP.setbackLeft||0)-setback);
+    return dz+correction-setback;
   }
   function mpStartRound() {
-    MP.collisionRound=null;mpBanterReset();
+    mpBanterReset();
     MP.started=true; MP.applying=true; state='intro';startRun();MP.applying=false;hidePanel($('#friendPanel'));hidePanel(ui.pause);
     // Begin from the shared server epoch, even when one phone receives it late.
     const elapsed=Math.max(0,(Date.now()+MP.clockOffset-MP.latest.startAt)/1000);
@@ -2498,7 +2528,7 @@
     if(elapsed>=1.35){state='running';speed=BASE_SPEED;G.runBlend=1;genie.root.rotation.y=Math.PI;}
     const world=(MP.peerWorld&&MP.peerWorld.round===MP.round?MP.peerWorld.state:null)||MP.latest.world, self=MP.latest.self;
     if(world&&world.distance>1) {
-      state='running';distance=world.distance;speed=world.speed;camBlend=1;G.runBlend=1;genie.root.rotation.y=Math.PI;
+      state='running';distance=Number.isFinite(self?.distance)?self.distance:world.distance+(world.racePenalty||0)-(MP.selfPenalty||0);distance=Math.max(0,distance);MP.setbackLeft=self?Math.max(0,self.setbackLeft||0)+Math.max(0,(MP.selfPenalty||0)-(self.racePenalty||0)):0;MP.hitGrace=1;speed=world.speed;camBlend=1;G.runBlend=1;genie.root.rotation.y=Math.PI;
       if(self){G.x=self.x;G.y=self.y;G.lane=Number.isInteger(self.lane)?self.lane:Math.max(-1,Math.min(1,Math.round(self.x/LANE_W)));G.vx=self.vx||0;G.vy=self.vy||0;G.slideT=Math.max(0,self.slideT||0);G.grounded=!!self.grounded;G.phase=self.phase;STYLE.score=self.score;syncStyle();}
       mpApplyObstacles(world);MP.serial=Math.max(0,...world.obstacles.map(o=>o[4]));
       wave=Number.isInteger(world.wave)?world.wave:0;spawnAt=Number.isFinite(world.spawnAt)?world.spawnAt:distance+Math.max(24,speed*1.3);
@@ -2526,8 +2556,10 @@
         mpStartRound();
       }
     }
+    const lead=(MP.friendPenalty||0)-(MP.selfPenalty||0);
+    const raceLabel=lead>0?'YOU LEAD '+lead+' m':lead<0?Math.abs(lead)+' m BEHIND':'NECK AND NECK';
     const live=MP.peerLast&&performance.now()-MP.peerLast<1200;
-    if(MP.latest&&MP.phase==='running')$('#friendBadge').textContent=(live?'LIVE · ':performance.now()-MP.lastOK>8000?'RECONNECTING · ':'ONLINE · ')+ 'YOU '+(MP.role==='host'?'LEFT':'RIGHT')+' · FRIEND '+(MP.role==='host'?'RIGHT':'LEFT');
+    if(MP.latest&&MP.phase==='running')$('#friendBadge').textContent=(live?'LIVE · ':performance.now()-MP.lastOK>8000?'RECONNECTING · ':'ONLINE · ')+(MP.noticeT>0?MP.notice+' · ':'')+raceLabel+' · 36 m LEAD WINS';
     if(MP.remote&&MP.started&&state!=='paused'&&state!=='over') {
       const p=MP.otherG,r=MP.remote;
       const poseElapsed=(performance.now()-MP.receivedAt)/1000;
@@ -2536,6 +2568,9 @@
       p.x=damp(p.x,pose.x,22,dt);p.y=damp(p.y,pose.y,24,dt);p.vx=pose.vx;p.vy=pose.vy;
       p.grounded=pose.grounded;p.slideT=pose.slideT;p.runBlend=r.run;p.phase=r.phase+Math.min(2,(MP.remoteAge||0)+poseElapsed)*(r.grounded?9+speed*.3:3);
       MP.otherGenie.root.rotation.y=r.rotation;animateGenie(dt,MP.otherGenie,p,true);MP.otherGenie.body.rotation.x=r.pitch;
+      const predictedDistance=r.distance+r.speed*age-Math.min(r.setbackLeft||0,r.speed*.8*age);
+      MP.otherZ=damp(MP.otherZ||0,clamp((distance-predictedDistance)*.28,-10,5),8,dt);
+      MP.otherGenie.root.position.z=MP.otherZ;MP.otherShadow.position.z=MP.otherZ;
       MP.otherShadow.position.x=p.x;MP.otherShadow.material.opacity=.62*(1-clamp(p.y/4,0,1)*.7);
     }
     obstacles.forEach((o,i)=>{const r=MP.otherObstacles[i];r.visible=o.active;r.position.copy(o.root.position);});
