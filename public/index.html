@@ -219,6 +219,28 @@
   @media (prefers-reduced-motion: reduce) {
     .panel, .hud, .hint, .cta, .icon-btn, .genie-comment, .style-toast { transition: none; }
   }
+  .genie-banter {
+    position: absolute; top: max(105px,calc(env(safe-area-inset-top) + 90px)); left: 50%;
+    transform: translateX(-50%); width: min(460px,calc(100vw - 28px)); padding: 10px 13px;
+    border: 1px solid rgba(139,220,180,.4); border-radius: 15px;
+    background: rgba(5,19,27,.9); color: #f0f6e9; pointer-events: none;
+    box-shadow: 0 5px 20px rgba(0,0,0,.15); font: 500 .79rem/1.4 var(--text);
+  }
+  .genie-banter[hidden] { display: none; }
+  .genie-banter p { display: grid; grid-template-columns: 86px 1fr; gap: 7px; margin: 0; }
+  .genie-banter p + p { margin-top: 5px; }
+  .genie-banter strong { font-size: .65rem; line-height: 1.7; white-space: nowrap; color: #c6f4a9; }
+  .genie-banter [data-side="right"] strong { color: #a4edf5; }
+  .genie-banter .banter-reply-pending { visibility: hidden; }
+  @media(max-width:540px) {
+    .genie-banter { top: max(148px,calc(env(safe-area-inset-top) + 122px)); padding: 8px 10px; font-size: .73rem; }
+    .genie-banter p { grid-template-columns: 76px 1fr; gap: 5px; }
+    .genie-banter strong { font-size: .6rem; }
+  }
+  @media(max-height:520px) and (min-width:541px) {
+    .genie-banter { top: 105px; width: min(380px,55vw); padding: 7px 10px; font-size: .7rem; }
+  }
+
 </style>
 </head>
 <body>
@@ -281,9 +303,14 @@
     <p id="friendStatus" role="status" aria-live="polite">Create a room and invite one friend.</p>
     <label for="friendLink" class="note">Your private room invite</label><input id="friendLink" readonly aria-label="Room invite link" value="">
     <div class="friend-rows"><button id="friendCopy" type="button" class="cta ghost" disabled>Copy invite</button><button id="friendReady" type="button" class="cta" disabled>Ready to run</button></div>
-    <p class="note">Two Genies. Six lanes. Keep running together. A hit breaks your combo and gives you a brief recovery shield.<br><small>Multiplayer build: smooth-track-2</small></p>
+    <p class="note">Two Genies. Six lanes. Run together. If either Genie clashes, both stop—then challenge each other to a rematch.<br><small>Multiplayer build: realtime-3</small></p>
     <button id="friendLeave" type="button" class="cta ghost">Leave room</button>
   </section>
+  <aside id="genieBanter" class="genie-banter" role="status" aria-live="polite" aria-atomic="true" hidden>
+    <p id="banterFirstRow"><strong id="banterFirstName"></strong><span id="banterFirstText"></span></p>
+    <p id="banterSecondRow" class="banter-reply-pending"><strong id="banterSecondName"></strong><span id="banterSecondText"></span></p>
+  </aside>
+
   <div id="friendBadge" class="friend-badge" hidden></div>
   <div id="styleHud" class="style-hud" hidden aria-label="Style score and combo">
     <div class="style-score"><span id="styleScore">0</span> <small>PTS</small></div>
@@ -1683,7 +1710,11 @@
       G.y < type.bottom + type.height - 0.06 && playerTop > type.bottom + 0.06;
   }
   function endRun(type) {
-    if(MP.active){mpRecoverHit();return;}
+    if(MP.active&&!MP.applying){
+      if(MP.collisionRound===MP.round)return;
+      const hit=Math.max(0,hazardTypes.indexOf(type));MP.pendingHit=hit;MP.collisionRound=MP.round;
+      mpSendEvent({kind:'clash',hit});mpShowClash(hit,MP.role);mpPersistClash();return;
+    }
     state = 'over'; speed = 0; G.runBlend = 0; Sound.bump(); Sound.setRun(0, false);
     shake = 0.3; hideHint(); ui.pauseBtn.hidden = true;
     commentTimer=0; $('#genieComment').classList.remove('is-on');
@@ -1713,9 +1744,8 @@
       const previousZ = o.root.position.z;
       o.root.position.z += dz;
       // Swept depth check also catches collisions on slower devices.
-      if (checkHits && !(MP.active&&MP.hitGrace>0) && !o.passed && previousZ < 0.8 && o.root.position.z > -0.8 && obstacleHit(o)) {
-        if(MP.active){o.passed=true;mpRecoverHit();}
-        else {endRun(hazardTypes[o.typeIndex]);return;}
+      if (checkHits && !o.passed && previousZ < 0.8 && o.root.position.z > -0.8 && obstacleHit(o)) {
+        endRun(hazardTypes[o.typeIndex]);return;
       }
       if (!o.passed && o.root.position.z > 0.8) {
         o.passed = true; cleared++;
@@ -2030,8 +2060,12 @@
   function frame(now) {
     const raw = Math.max(0, (now - lastNow) / 1000);
     lastNow = now;
-    if (state !== 'paused' && state !== 'over') step(Math.min(0.05, raw));
-    mpTick(Math.min(.05,raw));
+    // Small physics steps preserve wall time on slower phones without unstable lane physics.
+    if(state!=='paused'&&state!=='over'){
+      let remaining=Math.min(.25,raw);
+      while(remaining>0&&state!=='paused'&&state!=='over'){const dt=Math.min(1/60,remaining);step(dt);remaining-=dt;}
+    }
+    mpTick(Math.min(.25,raw));mpBanterTick(Math.min(.25,raw));
     renderer.render(scene, camera);
     if (state === 'running') {
       perfAcc += raw; perfN++;
@@ -2200,7 +2234,7 @@
   ui.menuBtn.addEventListener('click', backToStart);
   ui.pauseBtn.addEventListener('click', () => { if (state === 'paused') resumeGame(); else pauseGame(); });
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { if (state === 'running' || state === 'transition' || state === 'boost' || (MP.active&&MP.phase==='countdown')) pauseGame(); Sound.suspend(); }
+    if (document.hidden) { if (!MP.active&&(state === 'running' || state === 'transition' || state === 'boost' || (MP.active&&MP.phase==='countdown'))) pauseGame(); Sound.suspend(); }
     else if (state !== 'paused') { Sound.resume(); lastNow = performance.now(); }
   });
   window.addEventListener('resize', resize);
@@ -2236,15 +2270,102 @@
     $('#friendBadge').textContent='TOGETHER · YOU '+(side<0?'LEFT':'RIGHT')+' · FRIEND '+(side<0?'RIGHT':'LEFT');
   }
   function mpWorldSnapshot() {
-    const p={x:G.x,y:G.y,phase:G.phase,slide:G.slide,run:G.runBlend,pitch:genie.body.rotation.x,rotation:genie.root.rotation.y,grounded:G.grounded,score:STYLE.score,lane:G.lane,vx:G.vx,vy:G.vy,slideT:G.slideT};
+    const p={distance,speed,x:G.x,y:G.y,phase:G.phase,slide:G.slide,run:G.runBlend,pitch:genie.body.rotation.x,rotation:genie.root.rotation.y,grounded:G.grounded,score:STYLE.score,lane:G.lane,vx:G.vx,vy:G.vy,slideT:G.slideT};
     if(MP.role==='host')Object.assign(p,{distance,speed,wave,spawnAt,obstacles:obstacles.flatMap((o,i)=>o.active?[[i,o.typeIndex,o.lane,o.root.position.z,o.netSerial||0]]:[])});
     return p;
   }
-  function mpRecoverHit() {
-    if(MP.hitGrace>0)return;
-    MP.hitGrace=2;MP.hitNotice=2;STYLE.chain=0;STYLE.timer=0;syncStyle();
-    Sound.bump();shake=Math.max(shake,.18);
+  // Direct pose channel: old positions may be dropped; collision events are reliable.
+  function mpPeerClose() {
+    if(MP.pc){MP.pc.ondatachannel=null;MP.pc.close();}MP.pc=null;MP.poseChannel=null;MP.eventChannel=null;
+    MP.peerLast=0;MP.peerSeq=-1;MP.peerBusy=false;MP.offerKey=null;MP.peerWorld=null;
   }
+  function mpSendEvent(message) {
+    const channel=MP.eventChannel;
+    if(channel&&channel.readyState==='open'){try{channel.send(JSON.stringify({...message,round:MP.round}));}catch(_){} }
+  }
+  function mpPeerChannel(channel,pc) {
+    if(channel.label==='poses')MP.poseChannel=channel;else if(channel.label==='events')MP.eventChannel=channel;else {channel.close();return;}
+    channel.onopen=()=>{if(MP.pc===pc)MP.peerSendAt=0;};
+    channel.onmessage=e=>{
+      if(!MP.active||MP.pc!==pc||typeof e.data!=='string'||e.data.length>14000)return;
+      let packet;try{packet=JSON.parse(e.data);}catch(_){return;}
+      if(packet.round!==MP.round)return;
+      if(packet.kind==='clash'&&MP.phase!=='over'&&Number.isInteger(packet.hit)&&packet.hit>=0&&packet.hit<hazardTypes.length&&MP.started){
+        const who=MP.role==='host'?'guest':'host';mpShowClash(packet.hit,who);return;
+      }
+      if(packet.kind!=='pose'||!MP.started||!Number.isSafeInteger(packet.seq)||packet.seq<=MP.peerSeq)return;
+      const r=packet.state;
+      if(!r||!['x','y','phase','slide','run','pitch','rotation','score','lane','vx','vy','slideT','distance','speed'].every(k=>Number.isFinite(r[k]))||Math.abs(r.x)>5||r.y<0||r.y>20||Math.abs(r.vx)>100||Math.abs(r.vy)>100)return;
+      MP.peerSeq=packet.seq;MP.peerLast=performance.now();MP.remote=r;MP.receivedAt=MP.peerLast;
+      MP.remoteAge=Number.isFinite(packet.at)?clamp((Date.now()+MP.clockOffset-packet.at)/1000,0,.2):0;
+      if(MP.role==='guest')MP.peerWorld={round:MP.round,state:r};
+    };
+  }
+  function mpNewPeer() {
+    mpPeerClose();
+    const pc=new RTCPeerConnection({iceServers:MP.iceServers||[{urls:'stun:stun.cloudflare.com:3478'}]});
+    MP.pc=pc;pc.ondatachannel=e=>mpPeerChannel(e.channel,pc);
+    pc.onconnectionstatechange=()=>{if(MP.pc===pc&&pc.connectionState==='failed'){mpPeerClose();MP.peerRetryAt=performance.now()+8000;}};return pc;
+  }
+  async function mpGather(pc) {
+    if(pc.iceGatheringState==='complete')return;
+    await new Promise(resolve=>{
+      const done=()=>{pc.removeEventListener('icegatheringstatechange',changed);clearTimeout(timer);resolve();};
+      const changed=()=>{if(pc.iceGatheringState==='complete')done();};
+      const timer=setTimeout(done,3500);pc.addEventListener('icegatheringstatechange',changed);
+    });
+  }
+  async function mpPeerSignal(data) {
+    if(!MP.active||!window.RTCPeerConnection||MP.peerBusy||performance.now()<(MP.peerRetryAt||0)||!data.otherPeer)return;
+    const other=data.otherPeer, generation=MP.generation;
+    if(MP.role==='host') {
+      if(!MP.pc||MP.peerTarget!==other.session) {
+        const pc=mpNewPeer();MP.peerBusy=true;MP.peerTarget=other.session;
+        try {
+          mpPeerChannel(pc.createDataChannel('poses',{ordered:false,maxRetransmits:0}),pc);
+          mpPeerChannel(pc.createDataChannel('events'),pc);
+          await pc.setLocalDescription(await pc.createOffer());await mpGather(pc);
+          if(MP.pc===pc&&MP.active&&generation===MP.generation)
+            await mpCommand('signal',{peer:{session:MP.peerSession,target:other.session,kind:'offer',sdp:pc.localDescription.sdp}});
+        }catch(_){if(MP.pc===pc)mpPeerClose();}
+        finally{if(MP.pc===pc)MP.peerBusy=false;}
+      }else if(other.kind==='answer'&&other.target===MP.peerSession&&MP.pc.signalingState==='have-local-offer') {
+        MP.peerBusy=true;try{await MP.pc.setRemoteDescription({type:'answer',sdp:other.sdp});}catch(_){}finally{MP.peerBusy=false;}
+      }
+    }else if(other.kind==='offer'&&other.target===MP.peerSession&&MP.offerKey!==other.sdp) {
+      const pc=mpNewPeer();MP.peerBusy=true;MP.offerKey=other.sdp;MP.peerTarget=other.session;
+      try {
+        await pc.setRemoteDescription({type:'offer',sdp:other.sdp});await pc.setLocalDescription(await pc.createAnswer());await mpGather(pc);
+        if(MP.pc===pc&&MP.active&&generation===MP.generation)
+          await mpCommand('signal',{peer:{session:MP.peerSession,target:other.session,kind:'answer',sdp:pc.localDescription.sdp}});
+      }catch(_){if(MP.pc===pc)mpPeerClose();}finally{if(MP.pc===pc)MP.peerBusy=false;}
+    }
+  }
+  function mpPeerTick() {
+    const channel=MP.poseChannel,now=performance.now();
+    if(!MP.started||!channel||channel.readyState!=='open'||now<(MP.peerSendAt||0)||channel.bufferedAmount>32768)return;
+    MP.peerSendAt=now+50;
+    try{channel.send(JSON.stringify({kind:'pose',round:MP.round,seq:++MP.poseSeq,at:Date.now()+MP.clockOffset,state:mpWorldSnapshot()}));}catch(_){}
+  }
+  async function mpPersistClash() {
+    if(!MP.active||MP.pendingHit===null||MP.persisting)return;
+    const hit=MP.pendingHit,round=MP.round,generation=MP.generation;MP.persisting=true;
+    try {
+      const data=await mpFetch('end',{hit,round});
+      if(MP.active&&MP.generation===generation&&MP.round===round){mpApply(data);if(data.phase==='over')MP.pendingHit=null;}
+    }catch(_){}finally{MP.persisting=false;}
+  }
+  function mpShowClash(hit,who) {
+    if(!MP.active||!MP.started)return;
+    if(state!=='over'){MP.applying=true;endRun(hazardTypes[hit]||hazardTypes[0]);MP.applying=false;}
+    MP.collisionRound=MP.round;MP.clashBy=who;mpBanterReset();hidePanel($('#friendPanel'));hidePanel(ui.pause);
+    const mine=who===MP.role;
+    $('#overTitle').textContent=mine?'You clashed!':'Your friend clashed!';
+    $('#overText').textContent=(mine?'Your Genie':'Your friend’s Genie')+' hit “'+(hazardTypes[hit]||hazardTypes[0]).name+'”. Both runners stopped. '+(mine?'The obstacle would like its personal space back.':'Your Genie: “I was saving that obstacle for you!”');
+    $('#retryBtn').textContent=MP.pendingHit!==null?'Saving clash…':'Run together again';
+    $('#retryBtn').disabled=MP.pendingHit!==null||MP.phase!=='over';
+  }
+
   function mpSaveSession() { try{sessionStorage.setItem('genie-room',JSON.stringify({room:MP.room,token:MP.token,role:MP.role}));}catch(_){} }
   async function mpFetch(action,extra={}) {
     const begin=performance.now();
@@ -2258,17 +2379,18 @@
   function mpApply(data) {
     if(!MP.active)return;
     MP.role=data.role; MP.seed=data.seed; MP.latest=data; MP.lastOK=performance.now();
-    if(data.otherSeq===undefined||data.otherSeq!==MP.remoteSeq){
+    if((!MP.peerLast||performance.now()-MP.peerLast>1000)&&(data.otherSeq===undefined||data.otherSeq!==MP.remoteSeq)){
       MP.remote=data.other;MP.remoteSeq=data.otherSeq;MP.receivedAt=performance.now();
       MP.remoteAge=Number.isFinite(data.otherTime)?Math.max(0,data.serverTime-data.otherTime)/1000:0;
     }
-    if(data.phase==='closed'){mpLeave(false);mpStatus('Your friend left. Create a new room to play again.');return;}
+    if(data.phase==='closed'){$('#friendBadge').textContent='FRIEND LEFT · KEEP RUNNING OR LEAVE';MP.roomClosed=true;return;}
     if(data.round!==MP.round) {
-      MP.round=data.round; MP.started=false; MP.serial=0; MP.lastWorldSeq=-1;MP.hitGrace=2;MP.hitNotice=0;
+      MP.round=data.round; MP.started=false; MP.serial=0; MP.lastWorldSeq=-1;MP.collisionRound=null;MP.pendingHit=null;MP.peerSeq=-1;MP.peerLast=0;MP.peerWorld=null;MP.remote=null;MP.remoteSeq=undefined;MP.remoteAge=0;mpBanterReset();
       MP.applying=true; state='intro'; resetRun(); hidePanel(ui.start); hidePanel(ui.pause); hidePanel($('#overPanel')); MP.applying=false;
       MP.otherG={...G}; MP.otherGenie.root.rotation.y=0; obstacles.forEach(o=>o.netSerial=-1);
     }
-    MP.phase=data.phase;
+    MP.phase=data.phase;mpPeerSignal(data);
+    if(MP.collisionRound===MP.round&&data.phase!=='over'){mpPersistClash();return;}
     if(data.phase==='waiting'||data.phase==='countdown') {
       if(!MP.started)showPanel($('#friendPanel')); else hidePanel($('#friendPanel')); $('#friendReady').disabled=data.phase==='countdown'||(MP.role==='host'?data.hostReady:data.guestReady);
       $('#friendReady').textContent=(MP.role==='host'?data.hostReady:data.guestReady)?'You’re ready':'Ready to run';
@@ -2277,15 +2399,16 @@
     if(MP.started||data.phase==='paused'||data.phase==='over')hidePanel($('#friendPanel'));
     // Both clients simulate the seeded course locally; network packets never reposition live hurdles.
     if(data.phase==='paused') {
-      if(!MP.started&&data.world)mpStartRound();
+      if(!MP.started)mpStartRound();
       MP.applying=true;pauseGame();MP.applying=false;
       ui.pauseText.textContent=data.reason==='Waiting for your friend to reconnect'?'Waiting for your friend to reconnect…':'Together run paused. Resume when you’re both ready.';
     } else if(data.phase==='running'&&MP.started&&state==='paused') {
       MP.applying=true;resumeGame();MP.applying=false;
-    } else if(data.phase==='over'&&MP.started&&state!=='over') {
-      MP.applying=true;endRun(hazardTypes[data.hit]||hazardTypes[0]);MP.applying=false;
+    } else if(data.phase==='over') {
+      if(!MP.started)mpStartRound();
+      MP.pendingHit=null;mpShowClash(data.hit,data.hitBy||MP.clashBy||MP.role);
     }
-    if(data.phase==='over')$('#retryBtn').textContent=(MP.role==='host'?data.hostReady:data.guestReady)?'Waiting for friend…':'Run together again';
+    if(data.phase==='over'){$('#retryBtn').textContent=(MP.role==='host'?data.hostReady:data.guestReady)?'Waiting for friend…':'Run together again';$('#retryBtn').disabled=!!(MP.role==='host'?data.hostReady:data.guestReady);}
   }
   function mpCommand(action,extra={}) {
     const generation=MP.generation, commandRound=MP.round;
@@ -2296,7 +2419,7 @@
         if(action==='sync')extra={seq:++MP.seq,state:MP.started?mpWorldSnapshot():undefined};
         const data=await mpFetch(action,{round:commandRound,...extra});if(generation===MP.generation)mpApply(data); }
       catch(e) {if(generation===MP.generation){
-        if(e.status===401||e.status===404){mpLeave(false);hidePanel(ui.start);showPanel($('#friendPanel'));$('#friendReady').disabled=true;$('#friendCopy').disabled=true;}
+        if(e.status===401||e.status===404){MP.roomClosed=true;$('#friendBadge').textContent='ROOM UNAVAILABLE · KEEP RUNNING OR LEAVE';}
         mpStatus(e.message);$('#friendBadge').textContent='CONNECTION INTERRUPTED · RECONNECTING';
       }}
       finally {if(generation===MP.generation)MP.pending=false;}
@@ -2306,16 +2429,17 @@
   async function mpPoll() {
     if(!MP.active)return;
     const generation=MP.generation;
+    if(MP.pendingHit!==null)mpPersistClash();
     await mpCommand('sync');
-    if(MP.active&&generation===MP.generation)
-      MP.pollTimer=setTimeout(mpPoll,MP.started&&MP.phase==='running'?100:500);
+    if(MP.active&&!MP.roomClosed&&generation===MP.generation)
+      MP.pollTimer=setTimeout(mpPoll,MP.poseChannel&&MP.poseChannel.readyState==='open'?1000:(MP.started&&MP.phase==='running'?80:400));
   }
   async function mpOpen(room=null) {
     if(location.protocol==='file:'){hidePanel(ui.start);showPanel($('#friendPanel'));mpStatus('To play with a friend, open your deployed Vercel website. Solo play works in this file.');$('#friendReady').disabled=true;$('#friendCopy').disabled=true;$('#friendLeave').textContent='Back to solo';return;}
     if(MP.active)return;
     hidePanel(ui.start);showPanel($('#friendPanel'));mpStatus(room?'Joining your friend…':'Creating your room…');
     $('#friendReady').disabled=true;$('#friendCopy').disabled=true;
-    MP.active=true;MP.generation++;MP.seq=0;MP.round=0;MP.started=false;MP.pendingHit=null;MP.remoteSeq=undefined;MP.remoteAge=0;MP.hitGrace=0;MP.hitNotice=0;
+    MP.active=true;MP.generation++;MP.seq=0;MP.round=0;MP.started=false;MP.pendingHit=null;MP.remoteSeq=undefined;MP.remoteAge=0;MP.collisionRound=null;MP.roomClosed=false;MP.poseSeq=0;MP.peerSession=crypto.randomUUID();MP.peerSeq=-1;MP.peerLast=0;
     MP.pending=true;const generation=MP.generation;
     try {
       let saved;try{saved=JSON.parse(sessionStorage.getItem('genie-room')||'null');}catch(_){}
@@ -2323,20 +2447,23 @@
       if(room&&saved&&saved.room===room) {Object.assign(MP,saved);data=await mpFetch('sync');}
       else {MP.room=room;MP.token=null;data=await mpFetch(room?'join':'create');MP.token=data.token;MP.room=data.room;MP.role=data.role;}
       if(generation!==MP.generation||!MP.active)return;
-      MP.seq=Math.max(MP.seq,data.selfSeq||0);
+      if(data.protocol!=='realtime-3')throw new Error('This server needs the realtime-3 update. Deploy the matching lib/rooms.js file.');
+      MP.iceServers=data.iceServers;MP.seq=Math.max(MP.seq,data.selfSeq||0);
       mpLayout(true);mpSaveSession();
       history.replaceState(null,'',location.pathname+'#room='+MP.room);
       $('#friendLink').value=location.origin+location.pathname+'#room='+MP.room;
-      $('#friendCopy').disabled=false;mpApply(data);MP.pending=false;mpPoll();
+      $('#friendCopy').disabled=false;mpApply(data);MP.pending=false;
+      mpCommand('signal',{peer:{session:MP.peerSession,kind:'hello'}});mpPoll();
     } catch(e){MP.active=false;MP.pending=false;mpStatus(e.message);$('#friendLeave').textContent='Back to solo';}
   }
   function mpReady(){if(MP.active&&(MP.phase==='waiting'||MP.phase==='over')){$('#friendReady').disabled=true;mpCommand('ready');}}
   function mpLeave(notify=true) {
+    mpPeerClose();mpBanterReset();
     if(notify&&MP.active)fetch('/api/room',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action:'leave',room:MP.room,token:MP.token,round:MP.round}),keepalive:true}).catch(()=>{});
     MP.active=false;MP.generation++;clearTimeout(MP.pollTimer);MP.pending=false;MP.phase='';MP.pendingHit=null;MP.remote=null;MP.started=false;
     try{sessionStorage.removeItem('genie-room');}catch(_){}
     history.replaceState(null,'',location.pathname);hidePanel($('#friendPanel'));mpLayout(false);
-    $('#retryBtn').textContent='Try again';backToStart();
+    $('#retryBtn').textContent='Try again';$('#retryBtn').disabled=false;backToStart();
   }
   function mpApplyObstacles(world) {
     if(!Array.isArray(world.obstacles))return;
@@ -2355,24 +2482,24 @@
   }
   function mpAdjustDistance(dz,dt) {
     if(!MP.active||MP.role!=='guest'||!MP.remote||MP.phase!=='running')return dz;
-    const age=(MP.remoteAge||0)+(performance.now()-MP.receivedAt+MP.rtt/2)/1000;
+    const age=(MP.remoteAge||0)+(performance.now()-MP.receivedAt+(MP.peerLast&&performance.now()-MP.peerLast<1000?0:MP.rtt/2))/1000;
     // Stop chasing stale snapshots. A delayed packet must never jerk the road.
     if(age>2)return dz;
     const target=MP.remote.distance+MP.remote.speed*age;
     return dz+clamp((target-distance)*.6*dt,-dz*.08,dz*.08);
   }
   function mpStartRound() {
-    MP.hitGrace=2;MP.hitNotice=0;
+    MP.collisionRound=null;mpBanterReset();
     MP.started=true; MP.applying=true; state='intro';startRun();MP.applying=false;hidePanel($('#friendPanel'));hidePanel(ui.pause);
     // Begin from the shared server epoch, even when one phone receives it late.
     const elapsed=Math.max(0,(Date.now()+MP.clockOffset-MP.latest.startAt)/1000);
     transT=Math.min(1.35,elapsed);
     camBlend=clamp(transT/1.35,0,1);
     if(elapsed>=1.35){state='running';speed=BASE_SPEED;G.runBlend=1;genie.root.rotation.y=Math.PI;}
-    const world=MP.latest.world, self=MP.latest.self;
+    const world=(MP.peerWorld&&MP.peerWorld.round===MP.round?MP.peerWorld.state:null)||MP.latest.world, self=MP.latest.self;
     if(world&&world.distance>1) {
       state='running';distance=world.distance;speed=world.speed;camBlend=1;G.runBlend=1;genie.root.rotation.y=Math.PI;
-      if(self){G.x=self.x;G.y=self.y;G.lane=Math.max(-1,Math.min(1,Math.round(self.x/LANE_W)));G.grounded=!!self.grounded;G.phase=self.phase;STYLE.score=self.score;syncStyle();}
+      if(self){G.x=self.x;G.y=self.y;G.lane=Number.isInteger(self.lane)?self.lane:Math.max(-1,Math.min(1,Math.round(self.x/LANE_W)));G.vx=self.vx||0;G.vy=self.vy||0;G.slideT=Math.max(0,self.slideT||0);G.grounded=!!self.grounded;G.phase=self.phase;STYLE.score=self.score;syncStyle();}
       mpApplyObstacles(world);MP.serial=Math.max(0,...world.obstacles.map(o=>o[4]));
       wave=Number.isInteger(world.wave)?world.wave:0;spawnAt=Number.isFinite(world.spawnAt)?world.spawnAt:distance+Math.max(24,speed*1.3);
     }
@@ -2390,7 +2517,7 @@
   }
   function mpTick(dt) {
     if(!MP.active||!MP.visuals)return;
-    if(state==='running'||state==='transition'){MP.hitGrace=Math.max(0,(MP.hitGrace||0)-dt);MP.hitNotice=Math.max(0,(MP.hitNotice||0)-dt);}
+    mpPeerTick();
     const now=Date.now()+MP.clockOffset;
     if(!document.hidden&&(MP.phase==='countdown'||MP.phase==='running')&&!MP.started&&MP.latest) {
       const remaining=Math.ceil((MP.latest.startAt-now)/1000);
@@ -2399,16 +2526,15 @@
         mpStartRound();
       }
     }
-    if(MP.started&&performance.now()-MP.lastOK>15000&&state!=='over'&&state!=='paused') {
-      MP.applying=true;pauseGame();MP.applying=false;ui.pauseText.textContent='Connection interrupted. Waiting to reconnect…';
-    }
-    if(MP.latest&&MP.phase==='running')$('#friendBadge').textContent=MP.hitNotice>0?'BUMP! COMBO RESET · RECOVERY SHIELD':'TOGETHER · YOU '+(MP.role==='host'?'LEFT':'RIGHT')+' · FRIEND '+(MP.role==='host'?'RIGHT':'LEFT');
+    const live=MP.peerLast&&performance.now()-MP.peerLast<1200;
+    if(MP.latest&&MP.phase==='running')$('#friendBadge').textContent=(live?'LIVE · ':performance.now()-MP.lastOK>8000?'RECONNECTING · ':'ONLINE · ')+ 'YOU '+(MP.role==='host'?'LEFT':'RIGHT')+' · FRIEND '+(MP.role==='host'?'RIGHT':'LEFT');
     if(MP.remote&&MP.started&&state!=='paused'&&state!=='over') {
       const p=MP.otherG,r=MP.remote;
-      const age=Math.min(.3,(MP.remoteAge||0)+(performance.now()-MP.receivedAt+MP.rtt/2)/1000);
+      const poseElapsed=(performance.now()-MP.receivedAt)/1000;
+      const age=Math.min(.3,(MP.remoteAge||0)+poseElapsed+(live?0:MP.rtt/2000));
       const pose=mpPredictPose(r,age);
       p.x=damp(p.x,pose.x,22,dt);p.y=damp(p.y,pose.y,24,dt);p.vx=pose.vx;p.vy=pose.vy;
-      p.grounded=pose.grounded;p.slideT=pose.slideT;p.runBlend=r.run;p.phase=r.phase+age*(r.grounded?9+speed*.3:3);
+      p.grounded=pose.grounded;p.slideT=pose.slideT;p.runBlend=r.run;p.phase=r.phase+Math.min(2,(MP.remoteAge||0)+poseElapsed)*(r.grounded?9+speed*.3:3);
       MP.otherGenie.root.rotation.y=r.rotation;animateGenie(dt,MP.otherGenie,p,true);MP.otherGenie.body.rotation.x=r.pitch;
       MP.otherShadow.position.x=p.x;MP.otherShadow.material.opacity=.62*(1-clamp(p.y/4,0,1)*.7);
     }
@@ -2422,6 +2548,64 @@
     try{await navigator.clipboard.writeText(field.value);$('#friendCopy').textContent='Copied!';setTimeout(()=>$('#friendCopy').textContent='Copy invite',1800);}
     catch(_){field.focus();field.select();mpStatus('The invite is selected. Copy it and send it to your friend.');}
   });
+
+  /* Shared, lightweight banter; both players see the same exchange. */
+  const MP_BANTER_LINES = [
+    ['That tutorial is still loading!', 'Good. We have a launch to catch.'],
+    ['Was that a dodge or a dance move?', 'Premium choreography. Keep up!'],
+    ['Your cape has more traffic than my site.', 'Time to launch yours, then!'],
+    ['Budget barrier ahead. You paying?', 'I brought ideas. You bring the jumps.'],
+    ['One more tutorial?', 'One more dodge. Eyes on the road!'],
+    ['The launch button is getting lonely.', 'Tell it we are on our way!'],
+    ['You call that a jump?', 'I call it a free trial of flying.'],
+    ['I thought AI handled the hard parts.', 'You still have to dodge, superstar.'],
+    ['How many tabs do you have open?', 'Enough to build a second road.'],
+    ['Nice footwork. Can you do websites?', 'Watch me launch after this run.'],
+    ['Did you just dodge responsibility?', 'No, that one said TOO MANY TOOLS.'],
+    ['Your idea called. It wants a website.', 'Tell it we are building momentum!']
+  ];
+  const MP_BANTER={slot:-1,reply:false,key:''};
+  function mpBanterReset() {
+    MP_BANTER.slot=-1;MP_BANTER.reply=false;MP_BANTER.key='';
+    const box=$('#genieBanter');
+    if(box)box.hidden=true;
+  }
+  function mpBanterTick(dt) {
+    const box=$('#genieBanter');
+    if(!box)return;
+    if(!MP.active||!MP.started||state!=='running'||!MP.latest||!Number.isFinite(MP.latest.startAt)) {
+      box.hidden=true;return;
+    }
+    // The server epoch keeps exchanges aligned without sending chat packets.
+    const elapsed=Math.max(0,(Date.now()+(MP.clockOffset||0)-MP.latest.startAt)/1000);
+    const slot=Math.floor((elapsed-8)/14),within=elapsed-8-slot*14;
+    const comment=$('#genieComment');
+    if(slot<0||within>=5.5||(comment&&comment.classList.contains('is-on'))) {
+      box.hidden=true;return;
+    }
+    const key=String(MP.seed)+':'+String(MP.round);
+    if(MP_BANTER.slot!==slot||MP_BANTER.key!==key) {
+      const seed=Number(MP.seed)>>>0;
+      const pair=MP_BANTER_LINES[(seed%MP_BANTER_LINES.length+slot)%MP_BANTER_LINES.length];
+      const firstLeft=((seed+slot)&1)===0;
+      const sides=firstLeft?['left','right']:['right','left'];
+      const localSide=MP.role==='host'?'left':'right';
+      ['First','Second'].forEach((which,index)=>{
+        $('#banter'+which+'Row').dataset.side=sides[index];
+        $('#banter'+which+'Name').textContent=sides[index]===localSide?'Your Genie':"Friend’s Genie";
+        $('#banter'+which+'Text').textContent=index===0?pair[0]:'';
+      });
+      $('#banterSecondRow').classList.add('banter-reply-pending');
+      MP_BANTER.slot=slot;MP_BANTER.key=key;MP_BANTER.reply=false;
+    }
+    box.hidden=false;
+    if(within>=1.5&&!MP_BANTER.reply) {
+      const pair=MP_BANTER_LINES[((Number(MP.seed)>>>0)%MP_BANTER_LINES.length+slot)%MP_BANTER_LINES.length];
+      $('#banterSecondText').textContent=pair[1];
+      $('#banterSecondRow').classList.remove('banter-reply-pending');
+      MP_BANTER.reply=true;
+    }
+  }
 
   /* ---------------- boot ---------------- */
   resize();
