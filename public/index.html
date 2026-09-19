@@ -2260,10 +2260,11 @@
     }
     MP.phase=data.phase;
     if(data.phase==='waiting'||data.phase==='countdown') {
-      showPanel($('#friendPanel')); $('#friendReady').disabled=data.phase==='countdown'||(MP.role==='host'?data.hostReady:data.guestReady);
+      if(!MP.started)showPanel($('#friendPanel')); else hidePanel($('#friendPanel')); $('#friendReady').disabled=data.phase==='countdown'||(MP.role==='host'?data.hostReady:data.guestReady);
       $('#friendReady').textContent=(MP.role==='host'?data.hostReady:data.guestReady)?'You’re ready':'Ready to run';
       mpStatus(!data.joined?'Copy the invite link and send it to your friend.':data.hostReady&&data.guestReady?'Both ready!':(MP.role==='host'?data.hostReady:data.guestReady)?'You’re ready. Waiting for your friend…':'Your friend is here. Both tap Ready to run.');
     }
+    if(MP.started||data.phase==='paused'||data.phase==='over')hidePanel($('#friendPanel'));
     if(MP.role==='guest'&&data.other&&MP.started)mpApplyObstacles(data.other);
     if(data.phase==='paused') {
       if(!MP.started&&data.world)mpStartRound();
@@ -2277,11 +2278,11 @@
     if(data.phase==='over')$('#retryBtn').textContent=(MP.role==='host'?data.hostReady:data.guestReady)?'Waiting for friend…':'Run together again';
   }
   function mpCommand(action,extra={}) {
-    const generation=MP.generation;
+    const generation=MP.generation, commandRound=MP.round;
     MP.queue=MP.queue.catch(()=>{}).then(async()=>{
       if(!MP.active||generation!==MP.generation)return;
       MP.pending=true;
-      try { const data=await mpFetch(action,extra);if(generation===MP.generation)mpApply(data); }
+      try { const data=await mpFetch(action,{round:commandRound,...extra});if(generation===MP.generation)mpApply(data); }
       catch(e) {if(generation===MP.generation){
         if(e.status===401||e.status===404){mpLeave(false);hidePanel(ui.start);showPanel($('#friendPanel'));$('#friendReady').disabled=true;$('#friendCopy').disabled=true;}
         mpStatus(e.message);$('#friendBadge').textContent='CONNECTION INTERRUPTED · RECONNECTING';
@@ -2312,6 +2313,7 @@
       if(room&&saved&&saved.room===room) {Object.assign(MP,saved);data=await mpFetch('sync');}
       else {MP.room=room;MP.token=null;data=await mpFetch(room?'join':'create');MP.token=data.token;MP.room=data.room;MP.role=data.role;}
       if(generation!==MP.generation||!MP.active)return;
+      MP.seq=Math.max(MP.seq,data.selfSeq||0);
       mpLayout(true);mpSaveSession();
       history.replaceState(null,'',location.pathname+'#room='+MP.room);
       $('#friendLink').value=location.origin+location.pathname+'#room='+MP.room;
@@ -2332,17 +2334,24 @@
     for(const [i,type,lane,z,serial] of world.obstacles) {
       const o=obstacles[i];if(!o||o.typeIndex!==type)continue;present.add(i);
       if(o.netSerial!==serial) {o.netSerial=serial;o.passed=false;o.active=true;o.root.visible=true;o.lane=lane;o.root.position.set(lane*LANE_W,0,z+distance-world.distance);}
+      else if(o.active) {o.root.position.z=z+distance-world.distance;}
     }
     obstacles.forEach((o,i)=>{if(!present.has(i)){o.active=false;o.root.visible=false;}});
   }
   function mpAdjustDistance(dz,dt) {
     if(!MP.active||MP.role!=='guest'||!MP.remote||MP.phase!=='running')return dz;
-    const age=Math.min(.5,(performance.now()-MP.receivedAt+MP.rtt/2)/1000);
+    const snapshotAge=MP.latest&&Number.isFinite(MP.latest.worldTime)?Math.max(0,MP.latest.serverTime-MP.latest.worldTime):0;
+    const age=Math.min(1,(performance.now()-MP.receivedAt+MP.rtt/2+snapshotAge)/1000);
     const target=MP.remote.distance+MP.remote.speed*age;
     return dz+clamp((target-distance)*3*dt,-dz*.65,dz*.65);
   }
   function mpStartRound() {
-    MP.started=true; MP.applying=true; state='intro';startRun();MP.applying=false;hidePanel($('#friendPanel'));
+    MP.started=true; MP.applying=true; state='intro';startRun();MP.applying=false;hidePanel($('#friendPanel'));hidePanel(ui.pause);
+    // Begin from the shared server epoch, even when one phone receives it late.
+    const elapsed=Math.max(0,(Date.now()+MP.clockOffset-MP.latest.startAt)/1000);
+    transT=Math.min(1.35,elapsed);
+    camBlend=clamp(transT/1.35,0,1);
+    if(elapsed>=1.35){state='running';speed=BASE_SPEED;G.runBlend=1;genie.root.rotation.y=Math.PI;}
     const world=MP.latest.world, self=MP.latest.self;
     if(world&&world.distance>1) {
       state='running';distance=world.distance;speed=world.speed;camBlend=1;G.runBlend=1;genie.root.rotation.y=Math.PI;
@@ -2353,7 +2362,7 @@
   function mpTick(dt) {
     if(!MP.active||!MP.visuals)return;
     const now=Date.now()+MP.clockOffset;
-    if((MP.phase==='countdown'||MP.phase==='running')&&!MP.started&&MP.latest) {
+    if(!document.hidden&&(MP.phase==='countdown'||MP.phase==='running')&&!MP.started&&MP.latest) {
       const remaining=Math.ceil((MP.latest.startAt-now)/1000);
       mpStatus(remaining>0?'Starting together in '+remaining+'…':'Go!');
       if(remaining<=0) {
