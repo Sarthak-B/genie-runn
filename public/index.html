@@ -281,7 +281,7 @@
     <p id="friendStatus" role="status" aria-live="polite">Create a room and invite one friend.</p>
     <label for="friendLink" class="note">Your private room invite</label><input id="friendLink" readonly aria-label="Room invite link" value="">
     <div class="friend-rows"><button id="friendCopy" type="button" class="cta ghost" disabled>Copy invite</button><button id="friendReady" type="button" class="cta" disabled>Ready to run</button></div>
-    <p class="note">Two Genies. Six lanes. Dodge together—if either player hits a hurdle, try again as a team.</p>
+    <p class="note">Two Genies. Six lanes. Keep running together. A hit breaks your combo and gives you a brief recovery shield.<br><small>Multiplayer build: smooth-track-2</small></p>
     <button id="friendLeave" type="button" class="cta ghost">Leave room</button>
   </section>
   <div id="friendBadge" class="friend-badge" hidden></div>
@@ -1669,12 +1669,12 @@
     $('#dodgesVal').textContent = '0 obstacles cleared';
     hidePanel($('#overPanel'));
   }
-  function spawnObstacle(typeIndex, lane) {
+  function spawnObstacle(typeIndex, lane, offset=0) {
     const o = obstacles.find(o => !o.active && o.typeIndex === typeIndex);
     if (!o) return;
     o.active = true; o.passed = false; o.lane = lane;
     if(MP.active)o.netSerial=++MP.serial;
-    o.root.position.set(lane * LANE_W, 0, -82); o.root.visible = true;
+    o.root.position.set(lane * LANE_W, 0, -82+offset); o.root.visible = true;
   }
   function obstacleHit(o) {
     const type = hazardTypes[o.typeIndex];
@@ -1683,7 +1683,7 @@
       G.y < type.bottom + type.height - 0.06 && playerTop > type.bottom + 0.06;
   }
   function endRun(type) {
-    if(MP.active&&!MP.applying){MP.pendingHit=Math.max(0,hazardTypes.indexOf(type));mpCommand('end',{hit:MP.pendingHit}).then(()=>{if(MP.phase==='over')MP.pendingHit=null;});}
+    if(MP.active){mpRecoverHit();return;}
     state = 'over'; speed = 0; G.runBlend = 0; Sound.bump(); Sound.setRun(0, false);
     shake = 0.3; hideHint(); ui.pauseBtn.hidden = true;
     commentTimer=0; $('#genieComment').classList.remove('is-on');
@@ -1697,23 +1697,25 @@
     showPanel($('#overPanel')); $('#retryBtn').focus({ preventScroll: true });
   }
   function updateObstacles(dz, checkHits = true) {
-    if (distance >= spawnAt && !(MP.active&&MP.role==='guest')) {
-      const lane = wave === 0 ? 0 : Math.floor(Math.random() * 3) - 1;
-      spawnObstacle(wave % hazardTypes.length, lane);
+    while (distance >= spawnAt) {
+      const lane = wave === 0 ? 0 : Math.floor((MP.active?mpWaveRandom(wave,0):Math.random()) * 3) - 1;
+      const waveDistance=spawnAt;
+      spawnObstacle(wave % hazardTypes.length, lane, MP.active?distance-waveDistance-dz:0);
       // Later waves sometimes block two lanes, always leaving a clear route.
       if (wave >= 6 && wave % 3 === 0) {
         const other = [-1, 0, 1].filter(l => l !== lane);
-        spawnObstacle((wave + 1) % hazardTypes.length, other[Math.floor(Math.random() * 2)]);
+        spawnObstacle((wave + 1) % hazardTypes.length, other[Math.floor((MP.active?mpWaveRandom(wave,1):Math.random()) * 2)], MP.active?distance-waveDistance-dz:0);
       }
-      wave++; spawnAt = distance + Math.max(24, speed * 1.3);
+      wave++; spawnAt = MP.active?waveDistance+Math.max(24,milestoneSpeed(waveDistance)*1.3):distance+Math.max(24,speed*1.3);
     }
     for (const o of obstacles) {
       if (!o.active) continue;
       const previousZ = o.root.position.z;
       o.root.position.z += dz;
       // Swept depth check also catches collisions on slower devices.
-      if (checkHits && !o.passed && previousZ < 0.8 && o.root.position.z > -0.8 && obstacleHit(o)) {
-        endRun(hazardTypes[o.typeIndex]); return;
+      if (checkHits && !(MP.active&&MP.hitGrace>0) && !o.passed && previousZ < 0.8 && o.root.position.z > -0.8 && obstacleHit(o)) {
+        if(MP.active){o.passed=true;mpRecoverHit();}
+        else {endRun(hazardTypes[o.typeIndex]);return;}
       }
       if (!o.passed && o.root.position.z > 0.8) {
         o.passed = true; cleared++;
@@ -2234,9 +2236,14 @@
     $('#friendBadge').textContent='TOGETHER · YOU '+(side<0?'LEFT':'RIGHT')+' · FRIEND '+(side<0?'RIGHT':'LEFT');
   }
   function mpWorldSnapshot() {
-    const p={x:G.x,y:G.y,phase:G.phase,slide:G.slide,run:G.runBlend,pitch:genie.body.rotation.x,rotation:genie.root.rotation.y,grounded:G.grounded,score:STYLE.score};
-    if(MP.role==='host')Object.assign(p,{distance,speed,obstacles:obstacles.flatMap((o,i)=>o.active?[[i,o.typeIndex,o.lane,o.root.position.z,o.netSerial||0]]:[])});
+    const p={x:G.x,y:G.y,phase:G.phase,slide:G.slide,run:G.runBlend,pitch:genie.body.rotation.x,rotation:genie.root.rotation.y,grounded:G.grounded,score:STYLE.score,lane:G.lane,vx:G.vx,vy:G.vy,slideT:G.slideT};
+    if(MP.role==='host')Object.assign(p,{distance,speed,wave,spawnAt,obstacles:obstacles.flatMap((o,i)=>o.active?[[i,o.typeIndex,o.lane,o.root.position.z,o.netSerial||0]]:[])});
     return p;
+  }
+  function mpRecoverHit() {
+    if(MP.hitGrace>0)return;
+    MP.hitGrace=2;MP.hitNotice=2;STYLE.chain=0;STYLE.timer=0;syncStyle();
+    Sound.bump();shake=Math.max(shake,.18);
   }
   function mpSaveSession() { try{sessionStorage.setItem('genie-room',JSON.stringify({room:MP.room,token:MP.token,role:MP.role}));}catch(_){} }
   async function mpFetch(action,extra={}) {
@@ -2251,10 +2258,13 @@
   function mpApply(data) {
     if(!MP.active)return;
     MP.role=data.role; MP.seed=data.seed; MP.latest=data; MP.lastOK=performance.now();
-    MP.remote=data.other; MP.receivedAt=performance.now();
+    if(data.otherSeq===undefined||data.otherSeq!==MP.remoteSeq){
+      MP.remote=data.other;MP.remoteSeq=data.otherSeq;MP.receivedAt=performance.now();
+      MP.remoteAge=Number.isFinite(data.otherTime)?Math.max(0,data.serverTime-data.otherTime)/1000:0;
+    }
     if(data.phase==='closed'){mpLeave(false);mpStatus('Your friend left. Create a new room to play again.');return;}
     if(data.round!==MP.round) {
-      MP.round=data.round; MP.started=false; MP.serial=0; MP.lastWorldSeq=-1;
+      MP.round=data.round; MP.started=false; MP.serial=0; MP.lastWorldSeq=-1;MP.hitGrace=2;MP.hitNotice=0;
       MP.applying=true; state='intro'; resetRun(); hidePanel(ui.start); hidePanel(ui.pause); hidePanel($('#overPanel')); MP.applying=false;
       MP.otherG={...G}; MP.otherGenie.root.rotation.y=0; obstacles.forEach(o=>o.netSerial=-1);
     }
@@ -2265,7 +2275,7 @@
       mpStatus(!data.joined?'Copy the invite link and send it to your friend.':data.hostReady&&data.guestReady?'Both ready!':(MP.role==='host'?data.hostReady:data.guestReady)?'You’re ready. Waiting for your friend…':'Your friend is here. Both tap Ready to run.');
     }
     if(MP.started||data.phase==='paused'||data.phase==='over')hidePanel($('#friendPanel'));
-    if(MP.role==='guest'&&data.other&&MP.started)mpApplyObstacles(data.other);
+    // Both clients simulate the seeded course locally; network packets never reposition live hurdles.
     if(data.phase==='paused') {
       if(!MP.started&&data.world)mpStartRound();
       MP.applying=true;pauseGame();MP.applying=false;
@@ -2282,7 +2292,9 @@
     MP.queue=MP.queue.catch(()=>{}).then(async()=>{
       if(!MP.active||generation!==MP.generation)return;
       MP.pending=true;
-      try { const data=await mpFetch(action,{round:commandRound,...extra});if(generation===MP.generation)mpApply(data); }
+      try {
+        if(action==='sync')extra={seq:++MP.seq,state:MP.started?mpWorldSnapshot():undefined};
+        const data=await mpFetch(action,{round:commandRound,...extra});if(generation===MP.generation)mpApply(data); }
       catch(e) {if(generation===MP.generation){
         if(e.status===401||e.status===404){mpLeave(false);hidePanel(ui.start);showPanel($('#friendPanel'));$('#friendReady').disabled=true;$('#friendCopy').disabled=true;}
         mpStatus(e.message);$('#friendBadge').textContent='CONNECTION INTERRUPTED · RECONNECTING';
@@ -2291,21 +2303,19 @@
     });
     return MP.queue;
   }
-  function mpPoll() {
+  async function mpPoll() {
     if(!MP.active)return;
-    if(!MP.pending) {
-      if(MP.pendingHit!==null) {
-        const hit=MP.pendingHit;mpCommand('end',{hit}).then(()=>{if(MP.phase==='over')MP.pendingHit=null;});
-      } else mpCommand('sync',{seq:++MP.seq,state:MP.started?mpWorldSnapshot():undefined});
-    }
-    MP.pollTimer=setTimeout(mpPoll,MP.started&&MP.phase==='running'?120:500);
+    const generation=MP.generation;
+    await mpCommand('sync');
+    if(MP.active&&generation===MP.generation)
+      MP.pollTimer=setTimeout(mpPoll,MP.started&&MP.phase==='running'?100:500);
   }
   async function mpOpen(room=null) {
     if(location.protocol==='file:'){hidePanel(ui.start);showPanel($('#friendPanel'));mpStatus('To play with a friend, open your deployed Vercel website. Solo play works in this file.');$('#friendReady').disabled=true;$('#friendCopy').disabled=true;$('#friendLeave').textContent='Back to solo';return;}
     if(MP.active)return;
     hidePanel(ui.start);showPanel($('#friendPanel'));mpStatus(room?'Joining your friend…':'Creating your room…');
     $('#friendReady').disabled=true;$('#friendCopy').disabled=true;
-    MP.active=true;MP.generation++;MP.seq=0;MP.round=0;MP.started=false;MP.pendingHit=null;
+    MP.active=true;MP.generation++;MP.seq=0;MP.round=0;MP.started=false;MP.pendingHit=null;MP.remoteSeq=undefined;MP.remoteAge=0;MP.hitGrace=0;MP.hitNotice=0;
     MP.pending=true;const generation=MP.generation;
     try {
       let saved;try{saved=JSON.parse(sessionStorage.getItem('genie-room')||'null');}catch(_){}
@@ -2338,14 +2348,21 @@
     }
     obstacles.forEach((o,i)=>{if(!present.has(i)){o.active=false;o.root.visible=false;}});
   }
+  function mpWaveRandom(index,salt) {
+    let n=(MP.seed^Math.imul(index+1,0x9e3779b1)^Math.imul(salt+1,0x85ebca6b))>>>0;
+    n=Math.imul(n^(n>>>16),0x7feb352d);n=Math.imul(n^(n>>>15),0x846ca68b);
+    return ((n^(n>>>16))>>>0)/4294967296;
+  }
   function mpAdjustDistance(dz,dt) {
     if(!MP.active||MP.role!=='guest'||!MP.remote||MP.phase!=='running')return dz;
-    const snapshotAge=MP.latest&&Number.isFinite(MP.latest.worldTime)?Math.max(0,MP.latest.serverTime-MP.latest.worldTime):0;
-    const age=Math.min(1,(performance.now()-MP.receivedAt+MP.rtt/2+snapshotAge)/1000);
+    const age=(MP.remoteAge||0)+(performance.now()-MP.receivedAt+MP.rtt/2)/1000;
+    // Stop chasing stale snapshots. A delayed packet must never jerk the road.
+    if(age>2)return dz;
     const target=MP.remote.distance+MP.remote.speed*age;
-    return dz+clamp((target-distance)*3*dt,-dz*.65,dz*.65);
+    return dz+clamp((target-distance)*.6*dt,-dz*.08,dz*.08);
   }
   function mpStartRound() {
+    MP.hitGrace=2;MP.hitNotice=0;
     MP.started=true; MP.applying=true; state='intro';startRun();MP.applying=false;hidePanel($('#friendPanel'));hidePanel(ui.pause);
     // Begin from the shared server epoch, even when one phone receives it late.
     const elapsed=Math.max(0,(Date.now()+MP.clockOffset-MP.latest.startAt)/1000);
@@ -2356,11 +2373,24 @@
     if(world&&world.distance>1) {
       state='running';distance=world.distance;speed=world.speed;camBlend=1;G.runBlend=1;genie.root.rotation.y=Math.PI;
       if(self){G.x=self.x;G.y=self.y;G.lane=Math.max(-1,Math.min(1,Math.round(self.x/LANE_W)));G.grounded=!!self.grounded;G.phase=self.phase;STYLE.score=self.score;syncStyle();}
-      mpApplyObstacles(world);MP.serial=Math.max(0,...world.obstacles.map(o=>o[4]));spawnAt=distance+Math.max(24,speed*1.3);
+      mpApplyObstacles(world);MP.serial=Math.max(0,...world.obstacles.map(o=>o[4]));
+      wave=Number.isInteger(world.wave)?world.wave:0;spawnAt=Number.isFinite(world.spawnAt)?world.spawnAt:distance+Math.max(24,speed*1.3);
     }
+  }
+  function mpPredictPose(r,age) {
+    let x=r.x,vx=Number.isFinite(r.vx)?r.vx:0,y=r.y,vy=Number.isFinite(r.vy)?r.vy:0;
+    const lane=Number.isInteger(r.lane)?r.lane:Math.round(r.x/LANE_W);
+    let remaining=age;
+    while(remaining>0){const dt=Math.min(1/120,remaining);remaining-=dt;
+      vx+=((lane*LANE_W-x)*240-vx*2*Math.sqrt(240))*dt;x+=vx*dt;
+      if(!r.grounded&&y>=0){vy-=GRAVITY*dt;y+=vy*dt;if(y<0){y=0;vy=0;}}
+    }
+    return {x:clamp(x,-LANE_W,LANE_W),vx,y:Math.max(0,y),vy,grounded:!!r.grounded||y<=0,
+      slideT:Number.isFinite(r.slideT)?Math.max(0,r.slideT-age):(r.slide>.2?1:0)};
   }
   function mpTick(dt) {
     if(!MP.active||!MP.visuals)return;
+    if(state==='running'||state==='transition'){MP.hitGrace=Math.max(0,(MP.hitGrace||0)-dt);MP.hitNotice=Math.max(0,(MP.hitNotice||0)-dt);}
     const now=Date.now()+MP.clockOffset;
     if(!document.hidden&&(MP.phase==='countdown'||MP.phase==='running')&&!MP.started&&MP.latest) {
       const remaining=Math.ceil((MP.latest.startAt-now)/1000);
@@ -2369,14 +2399,16 @@
         mpStartRound();
       }
     }
-    if(MP.started&&performance.now()-MP.lastOK>3500&&state!=='over'&&state!=='paused') {
+    if(MP.started&&performance.now()-MP.lastOK>15000&&state!=='over'&&state!=='paused') {
       MP.applying=true;pauseGame();MP.applying=false;ui.pauseText.textContent='Connection interrupted. Waiting to reconnect…';
     }
-    if(MP.latest&&MP.phase==='running')$('#friendBadge').textContent='TOGETHER · YOU '+(MP.role==='host'?'LEFT':'RIGHT')+' · FRIEND '+(MP.role==='host'?'RIGHT':'LEFT');
+    if(MP.latest&&MP.phase==='running')$('#friendBadge').textContent=MP.hitNotice>0?'BUMP! COMBO RESET · RECOVERY SHIELD':'TOGETHER · YOU '+(MP.role==='host'?'LEFT':'RIGHT')+' · FRIEND '+(MP.role==='host'?'RIGHT':'LEFT');
     if(MP.remote&&MP.started&&state!=='paused'&&state!=='over') {
       const p=MP.otherG,r=MP.remote;
-      p.x=damp(p.x,r.x,16,dt);p.y=damp(p.y,r.y,18,dt);p.vx=0;p.vy=0;
-      p.grounded=!!r.grounded;p.slideT=r.slide>.2?1:0;p.runBlend=r.run;p.phase=r.phase+Math.min(.2,(performance.now()-MP.receivedAt)/1000)*(9+speed*.3);
+      const age=Math.min(.3,(MP.remoteAge||0)+(performance.now()-MP.receivedAt+MP.rtt/2)/1000);
+      const pose=mpPredictPose(r,age);
+      p.x=damp(p.x,pose.x,22,dt);p.y=damp(p.y,pose.y,24,dt);p.vx=pose.vx;p.vy=pose.vy;
+      p.grounded=pose.grounded;p.slideT=pose.slideT;p.runBlend=r.run;p.phase=r.phase+age*(r.grounded?9+speed*.3:3);
       MP.otherGenie.root.rotation.y=r.rotation;animateGenie(dt,MP.otherGenie,p,true);MP.otherGenie.body.rotation.x=r.pitch;
       MP.otherShadow.position.x=p.x;MP.otherShadow.material.opacity=.62*(1-clamp(p.y/4,0,1)*.7);
     }
