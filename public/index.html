@@ -303,7 +303,7 @@
     <p id="friendStatus" role="status" aria-live="polite">Create a room and invite one friend.</p>
     <label for="friendLink" class="note">Your private room invite</label><input id="friendLink" readonly aria-label="Room invite link" value="">
     <div class="friend-rows"><button id="friendCopy" type="button" class="cta ghost" disabled>Copy invite</button><button id="friendReady" type="button" class="cta" disabled>Ready to run</button></div>
-    <p class="note">Race your friend! Each clash sets you back 12 meters. Fall 36 meters behind and your friend wins. Keep dodging to stay in the race.<br><small>Multiplayer build: race-4</small></p>
+    <p class="note">Race your friend! Each clash sets you back 12 meters. Fall 36 meters behind and your friend wins. Keep dodging to stay in the race.<br><small>Multiplayer build: race-5</small></p>
     <button id="friendLeave" type="button" class="cta ghost">Leave room</button>
   </section>
   <aside id="genieBanter" class="genie-banter" role="status" aria-live="polite" aria-atomic="true" hidden>
@@ -379,7 +379,9 @@
   const RECYCLE_Z = 16;
   const BASE_SPEED = 16, MAX_SPEED = 34; // MAX_SPEED is only the visual/audio normalization reference.
   function milestoneSpeed(meters) {
-    return BASE_SPEED * Math.pow(1.10, Math.floor(Math.max(0, meters) / 300));
+    // Unlimited exponential speed eventually overflows and freezes an endless run.
+    const progress=Number.isFinite(meters)?Math.max(0,meters):0;
+    return Math.min(48, BASE_SPEED * Math.pow(1.10, Math.min(12,Math.floor(progress / 300))));
   }
   const GRAVITY = 27, JUMP_V = 8.6;
   const FOG_HEX = 0x0a1a2c;
@@ -1496,19 +1498,35 @@
   let edgeRightPresses = 0, boostT = 0, boostStartY = 0, boostStartSpeed = BASE_SPEED;
   let boostHeightOffset = 0, boostLandingY = null;
 
+  // Exact motion gives the same trajectory at phone, laptop and network update rates.
+  function advanceLaneMotion(player,dt) {
+    const target=player.lane*LANE_W,omega=Math.sqrt(240);
+    const offset=player.x-target,velocity=player.vx+omega*offset,decay=Math.exp(-omega*dt);
+    player.x=target+(offset+velocity*dt)*decay;
+    player.vx=(player.vx-omega*velocity*dt)*decay;
+  }
+  function advanceVerticalMotion(player,dt) {
+    if(player.grounded)return 0;
+    const height=Math.max(0,player.y),velocity=player.vy;
+    const landingTime=Math.max(0,(velocity+Math.sqrt(velocity*velocity+2*GRAVITY*height))/GRAVITY);
+    const airTime=Math.min(dt,landingTime);
+    player.y=Math.max(0,height+velocity*airTime-.5*GRAVITY*airTime*airTime);
+    player.vy=velocity-GRAVITY*airTime;
+    if(landingTime<=dt){player.y=0;player.vy=0;player.grounded=true;}
+    return airTime;
+  }
   function updateLaneMotion(dt) {
-    const tx = G.lane * LANE_W, K = 240, D = 2 * Math.sqrt(K);
-    G.vx += ((tx - G.x) * K - G.vx * D) * dt;
-    G.x += G.vx * dt;
+    advanceLaneMotion(G,dt);
   }
   function updatePlayer(dt) {
     updateLaneMotion(dt);
-    if (!G.grounded) {
-      G.vy -= GRAVITY * dt; G.y += G.vy * dt;
-      if (G.y <= 0) { G.y = 0; const impact = -G.vy; G.vy = 0; G.grounded = true; onLand(impact); }
-    }
-    if (G.slideT > 0) G.slideT -= dt;
-    G.phase += dt * G.runBlend * (G.grounded ? 9 + speed * 0.3 : 3);
+    const wasAirborne=!G.grounded;
+    const impact=wasAirborne?Math.sqrt(G.vy*G.vy+2*GRAVITY*Math.max(0,G.y)):0;
+    const airTime=advanceVerticalMotion(G,dt);
+    const landed=wasAirborne&&G.grounded;
+    if(landed)onLand(impact);
+    if(G.slideT>0)G.slideT=Math.max(0,G.slideT-(landed?dt-airTime:dt));
+    G.phase+=G.runBlend*(3*airTime+(9+speed*.3)*(dt-airTime));
   }
   function onLand(impact) {
     G.squash = clamp(impact / 14, 0.25, 1);
@@ -1552,10 +1570,9 @@
     const s = Math.sin(player.phase), c = Math.cos(player.phase), br = Math.sin(T * 2.1);
 
     // legs: run cycle, idle power stance, jump tuck, slide
-    const legRun = (sn, cs) => [-0.76 * sn, 0.3 + 1.1 * Math.max(0, cs), 0.34 * Math.max(0, cs) - 0.2 * Math.max(0, sn)];
-    const rl = legRun(s, c), rr2 = legRun(-s, -c);
-    let tL = lerp(lerp(0.02, rl[0], run), -1.05, air), kL = lerp(lerp(0.07, rl[1], run), 1.55, air), aL = lerp(rl[2] * run, 0.3, air);
-    let tR = lerp(lerp(0.02, rr2[0], run), 0.35, air), kR = lerp(lerp(0.07, rr2[1], run), 1.05, air), aR = lerp(rr2[2] * run, 0.5, air);
+    const positiveC=Math.max(0,c),negativeC=Math.max(0,-c);
+    let tL=lerp(lerp(.02,-.76*s,run),-1.05,air),kL=lerp(lerp(.07,.3+1.1*positiveC,run),1.55,air),aL=lerp((.34*positiveC-.2*Math.max(0,s))*run,.3,air);
+    let tR=lerp(lerp(.02,.76*s,run),.35,air),kR=lerp(lerp(.07,.3+1.1*negativeC,run),1.05,air),aR=lerp((.34*negativeC-.2*Math.max(0,-s))*run,.5,air);
     tL = lerp(tL, -1.4, sl); kL = lerp(kL, 0.1, sl); aL = lerp(aL, -0.3, sl);
     tR = lerp(tR, -1.18, sl); kR = lerp(kR, 0.42, sl); aR = lerp(aR, -0.1, sl);
     const spread = 0.11 * idle * grounded;
@@ -1770,11 +1787,20 @@
     STYLE.score=0; STYLE.chain=0; STYLE.timer=0; STYLE.toastT=0; STYLE.maxMultiplier=1;
     hideStyle(); $('#styleToast').textContent=''; syncStyle();
   }
-  function updateStyle(dt) {
-    STYLE.timer=Math.max(0,STYLE.timer-dt); STYLE.toastT=Math.max(0,STYLE.toastT-dt);
-    if(!STYLE.timer) STYLE.chain=0;
-    if(!STYLE.toastT) $('#styleToast').classList.remove('is-on');
-    $('#styleHud').hidden=false; syncStyle();
+  function updateStyle(dt,paint=true) {
+    STYLE.timer=Math.max(0,STYLE.timer-dt);STYLE.toastT=Math.max(0,STYLE.toastT-dt);
+    if(!STYLE.timer)STYLE.chain=0;
+    if(!paint)return;
+    const nodes=updateStyle.nodes||(updateStyle.nodes={hud:$('#styleHud'),toast:$('#styleToast'),score:$('#styleScore'),best:$('#styleBest'),combo:$('#styleCombo'),meter:$('#styleMeter')});
+    if(!STYLE.toastT)nodes.toast.classList.remove('is-on');
+    nodes.hud.hidden=false;
+    const score=STYLE.score.toLocaleString('en-US'),best=STYLE.best.toLocaleString('en-US');
+    const combo=styleMultiplier()+'×'+(STYLE.chain?' · '+STYLE.chain+' streak':'');
+    if(nodes.score.textContent!==score)nodes.score.textContent=score;
+    if(nodes.best.textContent!==best)nodes.best.textContent=best;
+    if(nodes.combo.textContent!==combo)nodes.combo.textContent=combo;
+    const meter='scaleX('+Math.max(0,Math.min(1,STYLE.timer/8))+')';
+    if(nodes.meter.style.transform!==meter)nodes.meter.style.transform=meter;
   }
   function awardStyle(o, allowStyle=true) {
     const type=hazardTypes[o.typeIndex], gap=Math.abs(G.x-o.root.position.x);
@@ -1841,8 +1867,14 @@
   const introPos = new THREE.Vector3(), introLook = new THREE.Vector3(), chasePos = new THREE.Vector3(), chaseLook = new THREE.Vector3(), camLook = new THREE.Vector3();
   function updateCamera(dt) {
     if(MP.active) {
-      camera.clearViewOffset(); camera.fov=portrait?72:65; camera.position.set(0,portrait?8.3:5.4,portrait?20:11);
-      camera.lookAt(0,1.2,-7); camera.updateProjectionMatrix(); lastFov=NaN; return;
+      const fov=portrait?72:65;
+      if(lastFov!==fov||lastOx!==0||lastOy!==0){
+        camera.fov=fov;
+        if(camera.view&&camera.view.enabled)camera.clearViewOffset();
+        camera.updateProjectionMatrix();lastFov=fov;lastOx=0;lastOy=0;
+      }
+      camera.position.set(0,portrait?8.3:5.4,portrait?20:11);
+      camera.lookAt(0,1.2,-7);return;
     }
     const a = -0.42 + 0.2 * Math.sin(T * 0.22), dist = portrait ? 5.9 : 4.6;
     introPos.set(Math.sin(a) * dist, portrait ? 1.5 : 1.65, Math.cos(a) * dist);
@@ -1864,7 +1896,7 @@
     camera.rotateZ(clamp(-G.vx * 0.011, -0.12, 0.12) * e);
     const fov = baseFov + (reduceMotion ? 0 : e * clamp((speed - BASE_SPEED) * 0.32, 0, 7));
     const ox = portrait ? 0 : -0.17 * vSize.w * (1 - e), oy = portrait ? 0.19 * vSize.h * (1 - e) : 0;
-    if (Math.abs(fov - lastFov) > 0.01 || ox !== lastOx || oy !== lastOy) {
+    if (!Number.isFinite(lastFov) || Math.abs(fov - lastFov) > 0.01 || ox !== lastOx || oy !== lastOy) {
       camera.fov = fov; lastFov = fov; lastOx = ox; lastOy = oy;
       if (Math.abs(ox) > 0.5 || Math.abs(oy) > 0.5) camera.setViewOffset(vSize.w, vSize.h, ox, oy, vSize.w, vSize.h);
       else { if (camera.view && camera.view.enabled) camera.clearViewOffset(); camera.updateProjectionMatrix(); }
@@ -1911,7 +1943,7 @@
       while (G.emitAcc >= 1) {
         G.emitAcc -= 1;
         (Math.random() < 0.5 ? genie.legL : genie.legR).ankle.getWorldPosition(tv);
-        emit(tv.x, tv.y - 0.1, tv.z, 1, 0.12, 1);
+        emit(tv.x-(MP.active&&MP.visuals?MP.localGroup.position.x:0), tv.y - 0.1, tv.z, 1, 0.12, 1);
       }
     }
     updateSparkles(dt, dz);
@@ -1974,7 +2006,7 @@
     }
     onLand(4); hideHint(); updateHUD();
   }
-  function updateBoost(dt) {
+  function updateBoost(dt,paint=true) {
     boostT = Math.min(boostT + dt, BOOST_LIFT + BOOST_DURATION + BOOST_LAND);
     const landing = ease(clamp((boostT - BOOST_LIFT - BOOST_DURATION) / BOOST_LAND, 0, 1));
     const flightPose = boostFlightBlend();
@@ -1996,79 +2028,88 @@
     updateObstacles(dz, false);
     G.phase += dt * (2 + 10 * landing); G.runBlend = landing;
     G.grounded = landing > 0.65;
-    animateWorld(dt); animateGenie(dt);
-    genie.body.rotation.x = 1.22 * flightPose;
-    genie.armL.sh.rotation.x = lerp(genie.armL.sh.rotation.x, -2.9, flightPose);
-    genie.armR.sh.rotation.x = lerp(genie.armR.sh.rotation.x, -2.9, flightPose);
-    genie.armL.elbow.rotation.x = lerp(genie.armL.elbow.rotation.x, -0.15, flightPose);
-    genie.armR.elbow.rotation.x = lerp(genie.armR.elbow.rotation.x, -0.15, flightPose);
-    genie.legL.thigh.rotation.x = lerp(genie.legL.thigh.rotation.x, 0.08, flightPose);
-    genie.legR.thigh.rotation.x = lerp(genie.legR.thigh.rotation.x, 0.12, flightPose);
-    genie.legL.knee.rotation.x = lerp(genie.legL.knee.rotation.x, 0.12, flightPose);
-    genie.legR.knee.rotation.x = lerp(genie.legR.knee.rotation.x, 0.2, flightPose);
-    genie.root.position.z = -2 * flightPose;
-    updateCape(0.75 + 0.25 * flightPose, clamp(-G.vx / 7, -1, 1), G.vy);
-    G.emitAcc += dt * (70 + 50 * cruise) * flightPose;
-    while (G.emitAcc >= 1) {
-      G.emitAcc -= 1;
-      emit(G.x, G.y + 0.1, genie.root.position.z + 0.8, 1, 0.35, 1.1);
-    }
-    updateEffects(dt, dz, false); updateCamera(dt); updateHUD(); showBoostStatus(); updateGenieComments(dt);
-    soundClock -= dt;
-    if (soundClock <= 0) { soundClock = 0.25; Sound.setRun(clamp(speed / MAX_SPEED, 0, 1), true); }
+    if(paint)renderGame(dt,dz);
     if (boostT >= BOOST_LIFT + BOOST_DURATION + BOOST_LAND) finishBoost();
   }
 
-  function step(dt) {
-    if (state === 'paused' || state === 'over') return;
-    T += dt;
-    if (state === 'running' || state === 'transition' || state === 'boost') updateStyle(dt);
-    if (state === 'boost') { updateBoost(dt); return; }
-    if (state === 'transition') {
-      transT += dt;
-      camBlend = clamp(transT / 1.35, 0, 1);
-      genie.root.rotation.y = Math.PI * ease(clamp(transT / 0.7, 0, 1));
-      G.runBlend = clamp((transT - 0.15) / 0.5, 0, 1);
-      speed = BASE_SPEED * ease(clamp((transT - 0.3) / 1.0, 0, 1));
-      if (transT >= 1.35) state = 'running';
-    } else if (state === 'running') {
-      speed = damp(speed, milestoneSpeed(distance+(MP.active?Math.max(0,(MP.selfPenalty||0)-(MP.setbackLeft||0)):0)), 1.5, dt);
+  function step(dt,paint=true) {
+    if(state==='paused'||state==='over')return;
+    T+=dt;
+    if(state==='running'||state==='transition'||state==='boost')updateStyle(dt,false);
+    if(state==='boost'){updateBoost(dt,paint);return;}
+    if(state==='transition'){
+      transT+=dt;camBlend=clamp(transT/1.35,0,1);
+      genie.root.rotation.y=Math.PI*ease(clamp(transT/.7,0,1));
+      G.runBlend=clamp((transT-.15)/.5,0,1);
+      speed=BASE_SPEED*ease(clamp((transT-.3)/1,0,1));
+      if(transT>=1.35)state='running';
+    }else if(state==='running'){
+      speed=damp(speed,milestoneSpeed(distance+(MP.active?Math.max(0,(MP.selfPenalty||0)-(MP.setbackLeft||0)):0)),1.5,dt);
     }
-    const active = state === 'running' || state === 'transition';
-    if (active) updatePlayer(dt);
-    const dz = mpAdjustDistance(speed * dt,dt);
-    distance += dz;
-    scrollWorld(dz);
-    if (active) updateObstacles(dz);
-    animateWorld(dt);
-    animateGenie(dt);
-    updateEffects(dt, dz, active);
-    holoClock -= dt;
-    if (holoClock <= 0) { holoClock = 0.11; drawFunnel(T); drawBuild(T); drawChart(T); drawStatus(T); }
-    const bendTarget = active ? 0.0012 * Math.sin(T * 0.12) + 0.0006 * Math.sin(T * 0.31 + 1.7) : 0;
-    bendU.value.x = damp(bendU.value.x, bendTarget, 0.8, dt);
+    const active=state==='running'||state==='transition';
+    if(active)updatePlayer(dt);
+    const dz=mpAdjustDistance(speed*dt,dt);
+    distance+=dz;scrollWorld(dz);
+    if(active)updateObstacles(dz);
+    if(paint)renderGame(dt,dz);
+  }
+
+  // Physics catches up in small steps; rendering and DOM work run once per display frame.
+  function renderGame(dt,dz) {
+    const active=state==='running'||state==='transition',boost=state==='boost';
+    animateWorld(dt);animateGenie(dt);
+    if(boost){
+      const flightPose=boostFlightBlend(),cruise=ease(clamp(boostT/2.5,0,1));
+      genie.body.rotation.x = 1.22 * flightPose;
+      genie.armL.sh.rotation.x = lerp(genie.armL.sh.rotation.x, -2.9, flightPose);
+      genie.armR.sh.rotation.x = lerp(genie.armR.sh.rotation.x, -2.9, flightPose);
+      genie.armL.elbow.rotation.x = lerp(genie.armL.elbow.rotation.x, -0.15, flightPose);
+      genie.armR.elbow.rotation.x = lerp(genie.armR.elbow.rotation.x, -0.15, flightPose);
+      genie.legL.thigh.rotation.x = lerp(genie.legL.thigh.rotation.x, 0.08, flightPose);
+      genie.legR.thigh.rotation.x = lerp(genie.legR.thigh.rotation.x, 0.12, flightPose);
+      genie.legL.knee.rotation.x = lerp(genie.legL.knee.rotation.x, 0.12, flightPose);
+      genie.legR.knee.rotation.x = lerp(genie.legR.knee.rotation.x, 0.2, flightPose);
+      genie.root.position.z = -2 * flightPose;
+      updateCape(0.75 + 0.25 * flightPose, clamp(-G.vx / 7, -1, 1), G.vy);
+      G.emitAcc += dt * (70 + 50 * cruise) * flightPose;
+      while (G.emitAcc >= 1) {
+        G.emitAcc -= 1;
+        emit(G.x, G.y + 0.1, genie.root.position.z + 0.8, 1, 0.35, 1.1);
+      }
+    }
+    updateEffects(dt,dz,active);
+    if(!boost){
+      holoClock-=dt;
+      if(holoClock<=0){holoClock=.11;drawFunnel(T);drawBuild(T);drawChart(T);drawStatus(T);}
+      const bendTarget=active?.0012*Math.sin(T*.12)+.0006*Math.sin(T*.31+1.7):0;
+      bendU.value.x=damp(bendU.value.x,bendTarget,.8,dt);
+    }
     updateCamera(dt);
-    if (active) { updateHUD(); updateGenieComments(dt); }
-    soundClock -= dt;
-    if (soundClock <= 0) { soundClock = 0.25; Sound.setRun(clamp(speed / MAX_SPEED, 0, 1), active); }
+    if(active||boost){updateStyle(0);updateHUD();updateGenieComments(dt);}
+    if(boost)showBoostStatus();
+    soundClock-=dt;
+    if(soundClock<=0){soundClock=.25;Sound.setRun(clamp(speed/MAX_SPEED,0,1),active||boost);}
   }
 
   let lastNow = performance.now(), perfAcc = 0, perfN = 0;
   function frame(now) {
-    const raw = Math.max(0, (now - lastNow) / 1000);
-    lastNow = now;
-    // Small physics steps preserve wall time on slower phones without unstable lane physics.
-    if(state!=='paused'&&state!=='over'){
+    const raw=Math.max(0,(now-lastNow)/1000);lastNow=now;
+    // Preserve elapsed game time without repeating expensive cosmetic work on slow frames.
+    let simulated=0;const previousDistance=distance;
+    if(!document.hidden&&state!=='paused'&&state!=='over'){
       let remaining=Math.min(.25,raw);
-      while(remaining>0&&state!=='paused'&&state!=='over'){const dt=Math.min(1/60,remaining);step(dt);remaining-=dt;}
+      while(remaining>1e-8&&state!=='paused'&&state!=='over'){
+        const dt=Math.min(1/60,remaining);step(dt,false);remaining-=dt;simulated+=dt;
+      }
     }
+    if(simulated>0)renderGame(simulated,distance-previousDistance);
     mpTick(Math.min(.25,raw));mpBanterTick(Math.min(.25,raw));
-    renderer.render(scene, camera);
-    if (state === 'running') {
-      perfAcc += raw; perfN++;
-      if (perfAcc > 3) {
-        const fps = perfN / perfAcc; perfAcc = 0; perfN = 0;
-        if (fps < 45 && prCap > 1) { prCap = Math.max(1, prCap - 0.35); resize(); }
+    renderer.render(scene,camera);
+    if(state==='running'){
+      perfAcc+=raw;perfN++;
+      if(perfAcc>3){
+        const fps=perfN/perfAcc;perfAcc=0;perfN=0;
+        if(fps<45&&prCap>1){prCap=Math.max(1,prCap-.35);resize();}
       }
     }
   }
@@ -2183,6 +2224,7 @@
   }
 
   window.addEventListener('keydown', (e) => {
+    if(document.activeElement&&/^(INPUT|TEXTAREA|SELECT)$/.test(document.activeElement.tagName))return;
     const k = e.key, playing = state === 'running' || state === 'transition' || state === 'boost';
     if (playing && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown', ' ', 'Spacebar'].indexOf(k) !== -1) e.preventDefault();
     if (state === 'intro') {
@@ -2203,7 +2245,11 @@
   });
 
   let swipe = null;
-  canvas.addEventListener('pointerdown', (e) => { swipe = { x: e.clientX, y: e.clientY, id: e.pointerId, done: false }; });
+  canvas.addEventListener('pointerdown', (e) => {
+    if(swipe)return;
+    swipe={x:e.clientX,y:e.clientY,id:e.pointerId,done:false};
+    try{canvas.setPointerCapture(e.pointerId);}catch(_){}
+  });
   canvas.addEventListener('pointermove', (e) => {
     if (!swipe || swipe.done || e.pointerId !== swipe.id) return;
     const dx = e.clientX - swipe.x, dy = e.clientY - swipe.y, th = Math.max(22, Math.min(vSize.w, vSize.h) * 0.04);
@@ -2211,7 +2257,7 @@
     swipe.done = true;
     if (Math.abs(dx) > Math.abs(dy)) act(dx > 0 ? 'right' : 'left', true); else act(dy < 0 ? 'jump' : 'slide');
   });
-  const endSwipe = () => { swipe = null; };
+  const endSwipe = e => { if(swipe&&e.pointerId===swipe.id)swipe=null; };
   window.addEventListener('pointerup', endSwipe);
   window.addEventListener('pointercancel', endSwipe);
   [[ui.padL, 'left'], [ui.padR, 'right']].forEach((p) => {
@@ -2231,8 +2277,14 @@
   ui.menuBtn.addEventListener('click', backToStart);
   ui.pauseBtn.addEventListener('click', () => { if (state === 'paused') resumeGame(); else pauseGame(); });
   document.addEventListener('visibilitychange', () => {
-    if (document.hidden) { if (!MP.active&&(state === 'running' || state === 'transition' || state === 'boost' || (MP.active&&MP.phase==='countdown'))) pauseGame(); Sound.suspend(); }
-    else if (state !== 'paused') { Sound.resume(); lastNow = performance.now(); }
+    swipe=null;
+    if(document.hidden){
+      if(MP.active){mpSaveSession();MP.wasHidden=true;}else if(['running','transition','boost'].includes(state))pauseGame();
+      Sound.suspend();
+    }else{
+      if(MP.active&&MP.wasHidden){MP.wasHidden=false;MP.recovering=MP.started&&state==='running';MP.peerSendAt=0;mpCommand('sync');}
+      if(state!=='paused')Sound.resume();lastNow=performance.now();
+    }
   });
   window.addEventListener('resize', resize);
   window.addEventListener('orientationchange', () => setTimeout(resize, 150));
@@ -2267,7 +2319,7 @@
     $('#friendBadge').textContent='TOGETHER · YOU '+(side<0?'LEFT':'RIGHT')+' · FRIEND '+(side<0?'RIGHT':'LEFT');
   }
   function mpWorldSnapshot() {
-    const p={distance,speed,racePenalty:MP.selfPenalty||0,setbackLeft:MP.setbackLeft||0,x:G.x,y:G.y,phase:G.phase,slide:G.slide,run:G.runBlend,pitch:genie.body.rotation.x,rotation:genie.root.rotation.y,grounded:G.grounded,score:STYLE.score,lane:G.lane,vx:G.vx,vy:G.vy,slideT:G.slideT};
+    const p={distance,speed,racePenalty:MP.selfPenalty||0,setbackLeft:MP.setbackLeft||0,x:G.x,y:G.y,phase:G.phase,slide:G.slide,run:G.runBlend,pitch:genie.body.rotation.x,rotation:genie.root.rotation.y,grounded:G.grounded,score:STYLE.score,lane:G.lane,vx:G.vx,vy:G.vy,slideT:G.slideT,slideQueued:G.slideQueued,recovering:!!MP.recovering};
     if(MP.role==='host')Object.assign(p,{distance,speed,wave,spawnAt,obstacles:obstacles.flatMap((o,i)=>o.active?[[i,o.typeIndex,o.lane,o.root.position.z,o.netSerial||0]]:[])});
     return p;
   }
@@ -2298,6 +2350,7 @@
       MP.peerSeq=packet.seq;MP.peerLast=performance.now();MP.remote=r;MP.receivedAt=MP.peerLast;
       MP.remoteAge=Number.isFinite(packet.at)?clamp((Date.now()+MP.clockOffset-packet.at)/1000,0,.2):0;
       if(MP.role==='guest')MP.peerWorld={round:MP.round,state:r};
+      mpRecoverFromPose(r,MP.remoteAge);
     };
   }
   function mpNewPeer() {
@@ -2342,14 +2395,14 @@
   }
   function mpPeerTick() {
     const channel=MP.poseChannel,now=performance.now();
-    if(!MP.started||!channel||channel.readyState!=='open'||now<(MP.peerSendAt||0)||channel.bufferedAmount>32768)return;
+    if(document.hidden||!MP.started||!channel||channel.readyState!=='open'||now<(MP.peerSendAt||0)||channel.bufferedAmount>32768)return;
     MP.peerSendAt=now+50;
     try{channel.send(JSON.stringify({kind:'pose',round:MP.round,seq:++MP.poseSeq,at:Date.now()+MP.clockOffset,state:mpWorldSnapshot()}));}catch(_){}
   }
   const RACE_SETBACK=12,RACE_LOSE_GAP=36;
   function mpRaceReset() {
     MP.selfPenalty=0;MP.friendPenalty=0;MP.setbackLeft=0;MP.hitGrace=0;MP.hitEvent=0;MP.hitQueue=[];
-    MP.race=null;MP.notice='';MP.noticeT=0;MP.otherZ=0;
+    MP.race=null;MP.notice='';MP.noticeT=0;MP.otherZ=0;MP.otherDistance=undefined;MP.course=null;MP.poseInitialized=false;MP.recovering=false;
     if(MP.otherGenie)MP.otherGenie.root.position.z=0;if(MP.otherShadow)MP.otherShadow.position.z=0;
   }
   function mpRaceSync(race) {
@@ -2359,13 +2412,14 @@
     MP.friendPenalty=Math.max(MP.friendPenalty||0,race[friend+'Penalty']||0);
     MP.hitEvent=Math.max(MP.hitEvent||0,race[mine+'Event']||0);
     MP.hitQueue=(MP.hitQueue||[]).filter(event=>event.event>(race[mine+'Event']||0));
+    mpSaveSession();
   }
   function mpRaceHit(hit) {
     if(!MP.active||!MP.started||MP.phase==='over'||state==='over'||MP.hitGrace>0)return;
     MP.hitGrace=2;MP.selfPenalty+=RACE_SETBACK;MP.setbackLeft+=RACE_SETBACK;
     STYLE.chain=0;STYLE.timer=0;syncStyle();Sound.bump();shake=Math.max(shake,.22);
     MP.notice='CLASH! −12 m';MP.noticeT=2;
-    const event={event:++MP.hitEvent,hit,round:MP.round};MP.hitQueue.push(event);
+    const event={event:++MP.hitEvent,hit,round:MP.round};MP.hitQueue.push(event);mpSaveSession();
     mpSendEvent({kind:'hit',...event,penalty:MP.selfPenalty});mpPersistHits();
   }
   async function mpPersistHits() {
@@ -2387,31 +2441,52 @@
     $('#retryBtn').textContent='Race again';$('#retryBtn').disabled=false;
   }
 
-  function mpSaveSession() { try{sessionStorage.setItem('genie-room',JSON.stringify({room:MP.room,token:MP.token,role:MP.role}));}catch(_){} }
+  function mpSaveSession() {
+    if(!MP.active||!MP.room||!MP.token)return;
+    try{sessionStorage.setItem('genie-room',JSON.stringify({room:MP.room,token:MP.token,role:MP.role,round:MP.round,
+      hitQueue:MP.hitQueue||[],hitEvent:MP.hitEvent||0,selfPenalty:MP.selfPenalty||0,
+      snapshot:MP.started?mpWorldSnapshot():null,savedAt:Date.now()+MP.clockOffset}));}catch(_){}
+  }
+  function mpRestoreHits(data) {
+    const saved=MP.restoreSession;MP.restoreSession=null;
+    if(!saved||saved.round!==data.round)return;
+    const ack=data.race?.[(MP.role==='host'?'host':'guest')+'Event']||0;
+    MP.hitQueue=(Array.isArray(saved.hitQueue)?saved.hitQueue:[]).filter(e=>e.round===data.round&&Number.isSafeInteger(e.event)&&e.event>ack&&Number.isInteger(e.hit)&&e.hit>=0&&e.hit<8).sort((a,b)=>a.event-b.event);
+    MP.hitEvent=Math.max(ack,...MP.hitQueue.map(e=>e.event));
+    const canonical=data.race?.[(MP.role==='host'?'host':'guest')+'Penalty']||0;
+    MP.selfPenalty=canonical+MP.hitQueue.length*RACE_SETBACK;
+    if(saved.snapshot&&Number.isFinite(saved.snapshot.distance)&&Number.isFinite(saved.savedAt)&&saved.savedAt>(data.selfTime||0))MP.resumeSnapshot=saved.snapshot;
+  }
   async function mpFetch(action,extra={}) {
-    const begin=performance.now();
-    const response=await fetch('/api/room',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,room:MP.room,token:MP.token,round:MP.round,...extra}),signal:AbortSignal.timeout(7000)});
+    const begin=performance.now(),controller=new AbortController(),timer=setTimeout(()=>controller.abort(),7000);
+    try {
+    const response=await fetch('/api/room',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({action,room:MP.room,token:MP.token,round:MP.round,...extra}),signal:controller.signal});
     const data=await response.json();
     if(!response.ok){const error=new Error(data.error||'Could not connect. Please try again.');error.status=response.status;throw error;}
     MP.rtt=performance.now()-begin;
-    MP.clockOffset=data.serverTime-Date.now()+MP.rtt/2;
+    const offset=data.serverTime-Date.now()+MP.rtt/2;
+    if(!MP.clockReady||MP.rtt<=(MP.bestRTT||Infinity)*1.5){MP.clockOffset=MP.clockReady?lerp(MP.clockOffset,offset,.2):offset;MP.clockReady=true;MP.bestRTT=Math.min(MP.bestRTT||Infinity,MP.rtt);}
     return data;
+    } finally {clearTimeout(timer);}
   }
   function mpApply(data) {
     if(!MP.active)return;
+    if(Number.isSafeInteger(data.revision)&&data.revision<=(MP.revision??-1))return;
     if(data.round<MP.round||(data.round===MP.round&&MP.phase==='over'&&data.phase!=='over'))return;
+    if(Number.isSafeInteger(data.revision))MP.revision=data.revision;
     MP.role=data.role; MP.seed=data.seed; MP.latest=data; MP.lastOK=performance.now();
-    if((!MP.peerLast||performance.now()-MP.peerLast>1000)&&(data.otherSeq===undefined||data.otherSeq!==MP.remoteSeq)){
-      MP.remote=data.other;MP.remoteSeq=data.otherSeq;MP.receivedAt=performance.now();
-      MP.remoteAge=Number.isFinite(data.otherTime)?Math.max(0,data.serverTime-data.otherTime)/1000:0;
-    }
     if(data.phase==='closed'){$('#friendBadge').textContent='FRIEND LEFT · KEEP RUNNING OR LEAVE';MP.roomClosed=true;return;}
     if(data.round!==MP.round) {
       MP.round=data.round; MP.started=false; MP.serial=0; MP.lastWorldSeq=-1;mpRaceReset();MP.peerSeq=-1;MP.peerLast=0;MP.peerWorld=null;MP.remote=null;MP.remoteSeq=undefined;MP.remoteAge=0;mpBanterReset();
       MP.applying=true; state='intro'; resetRun(); hidePanel(ui.start); hidePanel(ui.pause); hidePanel($('#overPanel')); MP.applying=false;
-      MP.otherG={...G}; MP.otherGenie.root.rotation.y=0; obstacles.forEach(o=>o.netSerial=-1);
+      MP.otherG={...G}; MP.otherGenie.root.rotation.y=0;animateGenie(0,MP.otherGenie,MP.otherG,true);MP.otherShadow.position.set(0,MP.otherShadow.position.y,0); obstacles.forEach(o=>o.netSerial=-1);
     }
-    MP.phase=data.phase;mpRaceSync(data.race);mpPeerSignal(data);
+    MP.phase=data.phase;mpRestoreHits(data);mpRaceSync(data.race);mpPeerSignal(data);
+    if((!MP.peerLast||performance.now()-MP.peerLast>1000)&&data.other&&Number.isSafeInteger(data.otherSeq)&&data.otherSeq>(MP.remoteSeq??-1)){
+      MP.remote=data.other;MP.remoteSeq=data.otherSeq;MP.receivedAt=performance.now();
+      MP.remoteAge=Number.isFinite(data.otherTime)?Math.max(0,Date.now()+MP.clockOffset-data.otherTime)/1000:0;
+      mpRecoverFromPose(data.other,MP.remoteAge);
+    }
     if(data.phase==='waiting'||data.phase==='countdown') {
       if(!MP.started)showPanel($('#friendPanel')); else hidePanel($('#friendPanel')); $('#friendReady').disabled=data.phase==='countdown'||(MP.role==='host'?data.hostReady:data.guestReady);
       $('#friendReady').textContent=(MP.role==='host'?data.hostReady:data.guestReady)?'You’re ready':'Ready to run';
@@ -2437,7 +2512,7 @@
       if(!MP.active||generation!==MP.generation)return;
       MP.pending=true;
       try {
-        if(action==='sync')extra={seq:++MP.seq,state:MP.started?mpWorldSnapshot():undefined};
+        if(action==='sync')extra={seq:++MP.seq,state:MP.started&&!document.hidden?mpWorldSnapshot():undefined};
         const data=await mpFetch(action,{round:commandRound,...extra});if(generation===MP.generation)mpApply(data); }
       catch(e) {if(generation===MP.generation){
         if(e.status===401||e.status===404){MP.roomClosed=true;$('#friendBadge').textContent='ROOM UNAVAILABLE · KEEP RUNNING OR LEAVE';}
@@ -2460,17 +2535,17 @@
     if(MP.active)return;
     hidePanel(ui.start);showPanel($('#friendPanel'));mpStatus(room?'Joining your friend…':'Creating your room…');
     $('#friendReady').disabled=true;$('#friendCopy').disabled=true;
-    MP.active=true;mpRaceReset();MP.generation++;MP.seq=0;MP.round=0;MP.started=false;MP.pendingHit=null;MP.remoteSeq=undefined;MP.remoteAge=0;MP.collisionRound=null;MP.roomClosed=false;MP.poseSeq=0;MP.peerSession=crypto.randomUUID();MP.peerSeq=-1;MP.peerLast=0;
+    MP.active=true;mpRaceReset();MP.revision=-1;MP.restoreSession=null;MP.resumeSnapshot=null;MP.clockReady=false;MP.bestRTT=Infinity;MP.generation++;MP.seq=0;MP.round=0;MP.started=false;MP.pendingHit=null;MP.remoteSeq=undefined;MP.remoteAge=0;MP.collisionRound=null;MP.roomClosed=false;MP.poseSeq=0;MP.peerSession=crypto.randomUUID();MP.peerSeq=-1;MP.peerLast=0;
     MP.pending=true;const generation=MP.generation;
     try {
       let saved;try{saved=JSON.parse(sessionStorage.getItem('genie-room')||'null');}catch(_){}
       let data;
-      if(room&&saved&&saved.room===room) {Object.assign(MP,saved);data=await mpFetch('sync');}
+      if(room&&saved&&saved.room===room) {MP.room=saved.room;MP.token=saved.token;MP.role=saved.role;MP.restoreSession=saved;data=await mpFetch('sync');}
       else {MP.room=room;MP.token=null;data=await mpFetch(room?'join':'create');MP.token=data.token;MP.room=data.room;MP.role=data.role;}
       if(generation!==MP.generation||!MP.active)return;
-      if(data.protocol!=='race-4')throw new Error('This server needs the race-4 update. Deploy the matching lib/rooms.js file.');
+      if(data.protocol!=='race-5')throw new Error('This server needs the race-5 update. Deploy the matching lib/rooms.js file.');
       MP.iceServers=data.iceServers;MP.seq=Math.max(MP.seq,data.selfSeq||0);
-      mpLayout(true);mpSaveSession();
+      mpLayout(true);
       history.replaceState(null,'',location.pathname+'#room='+MP.room);
       $('#friendLink').value=location.origin+location.pathname+'#room='+MP.room;
       $('#friendCopy').disabled=false;mpApply(data);MP.pending=false;
@@ -2505,8 +2580,8 @@
     if(!MP.active)return dz;
     MP.hitGrace=Math.max(0,(MP.hitGrace||0)-dt);MP.noticeT=Math.max(0,(MP.noticeT||0)-dt);
     let correction=0;
-    if(MP.role==='guest'&&MP.remote&&MP.phase==='running') {
-      const age=(MP.remoteAge||0)+(performance.now()-MP.receivedAt+(MP.peerLast&&performance.now()-MP.peerLast<1000?0:MP.rtt/2))/1000;
+    if(MP.role==='guest'&&MP.remote&&!MP.remote.recovering&&!MP.recovering&&MP.phase==='running') {
+      const age=(MP.remoteAge||0)+(performance.now()-MP.receivedAt)/1000;
       if(age<=2){
         const remoteServed=Math.max(0,(MP.remote.racePenalty||0)-(MP.remote.setbackLeft||0));
         const localServed=Math.max(0,(MP.selfPenalty||0)-(MP.setbackLeft||0));
@@ -2526,24 +2601,53 @@
     transT=Math.min(1.35,elapsed);
     camBlend=clamp(transT/1.35,0,1);
     if(elapsed>=1.35){state='running';speed=BASE_SPEED;G.runBlend=1;genie.root.rotation.y=Math.PI;}
-    const world=(MP.peerWorld&&MP.peerWorld.round===MP.round?MP.peerWorld.state:null)||MP.latest.world, self=MP.latest.self;
+    const world=(MP.peerWorld&&MP.peerWorld.round===MP.round?MP.peerWorld.state:null)||MP.latest.world, self=MP.resumeSnapshot||MP.latest.self;MP.resumeSnapshot=null;
     if(world&&world.distance>1) {
       state='running';distance=Number.isFinite(self?.distance)?self.distance:world.distance+(world.racePenalty||0)-(MP.selfPenalty||0);distance=Math.max(0,distance);MP.setbackLeft=self?Math.max(0,self.setbackLeft||0)+Math.max(0,(MP.selfPenalty||0)-(self.racePenalty||0)):0;MP.hitGrace=1;speed=world.speed;camBlend=1;G.runBlend=1;genie.root.rotation.y=Math.PI;
-      if(self){G.x=self.x;G.y=self.y;G.lane=Number.isInteger(self.lane)?self.lane:Math.max(-1,Math.min(1,Math.round(self.x/LANE_W)));G.vx=self.vx||0;G.vy=self.vy||0;G.slideT=Math.max(0,self.slideT||0);G.grounded=!!self.grounded;G.phase=self.phase;STYLE.score=self.score;syncStyle();}
-      mpApplyObstacles(world);MP.serial=Math.max(0,...world.obstacles.map(o=>o[4]));
-      wave=Number.isInteger(world.wave)?world.wave:0;spawnAt=Number.isFinite(world.spawnAt)?world.spawnAt:distance+Math.max(24,speed*1.3);
+      if(self){G.x=self.x;G.y=self.y;G.lane=Number.isInteger(self.lane)?self.lane:Math.max(-1,Math.min(1,Math.round(self.x/LANE_W)));G.vx=self.vx||0;G.vy=self.vy||0;G.slideT=Math.max(0,self.slideT||0);G.slideQueued=!!self.slideQueued;G.grounded=!!self.grounded;G.phase=self.phase;STYLE.score=self.score;syncStyle();}
+      mpRebuildCourse();MP.recovering=MP.phase==='running';
     }
   }
   function mpPredictPose(r,age) {
-    let x=r.x,vx=Number.isFinite(r.vx)?r.vx:0,y=r.y,vy=Number.isFinite(r.vy)?r.vy:0;
-    const lane=Number.isInteger(r.lane)?r.lane:Math.round(r.x/LANE_W);
-    let remaining=age;
-    while(remaining>0){const dt=Math.min(1/120,remaining);remaining-=dt;
-      vx+=((lane*LANE_W-x)*240-vx*2*Math.sqrt(240))*dt;x+=vx*dt;
-      if(!r.grounded&&y>=0){vy-=GRAVITY*dt;y+=vy*dt;if(y<0){y=0;vy=0;}}
+    const p={x:r.x,vx:r.vx||0,y:r.y,vy:r.vy||0,grounded:!!r.grounded,lane:Number.isInteger(r.lane)?r.lane:Math.round(r.x/LANE_W),slideT:Math.max(0,r.slideT||0)};
+    advanceLaneMotion(p,age);
+    const wasAirborne=!p.grounded,airTime=advanceVerticalMotion(p,age);
+    const queued=wasAirborne&&p.grounded&&r.slideQueued;
+    p.slideT=queued?Math.max(0,.78-(age-airTime)):Math.max(0,p.slideT-age);
+    p.phase=r.phase+(r.run||0)*(3*airTime+(9+r.speed*.3)*(age-airTime));
+    return p;
+  }
+  // Recreate the same seeded course at either runner's own progress, including refreshes.
+  function mpCourseWindow(at) {
+    let c=MP.course;
+    if(!c||c.seed!==MP.seed||at<c.floor){c=MP.course={seed:MP.seed,next:48,wave:0,floor:0,entries:[]};}
+    while(c.next<=at){
+      const w=c.wave,lane=w===0?0:Math.floor(mpWaveRandom(w,0)*3)-1;
+      c.entries.push({type:w%hazardTypes.length,lane,at:c.next,serial:w*2+1});
+      if(w>=6&&w%3===0){const lanes=[-1,0,1].filter(l=>l!==lane);c.entries.push({type:(w+1)%hazardTypes.length,lane:lanes[Math.floor(mpWaveRandom(w,1)*2)],at:c.next,serial:w*2+2});}
+      c.wave++;c.next+=Math.max(24,milestoneSpeed(c.next)*1.3);
     }
-    return {x:clamp(x,-LANE_W,LANE_W),vx,y:Math.max(0,y),vy,grounded:!!r.grounded||y<=0,
-      slideT:Number.isFinite(r.slideT)?Math.max(0,r.slideT-age):(r.slide>.2?1:0)};
+    if(c.entries.length>512){c.entries=c.entries.slice(-384);c.floor=c.entries[0].at+94;}
+    return c.entries.filter(o=>o.at<=at&&at-o.at<=94).map(o=>({...o,z:at-o.at-82}));
+  }
+  function mpRebuildCourse() {
+    const entries=mpCourseWindow(distance);
+    obstacles.forEach(o=>{o.active=false;o.root.visible=false;});
+    for(const e of entries){const o=obstacles.find(o=>!o.active&&o.typeIndex===e.type);if(!o)continue;
+      o.active=true;o.passed=e.z>.8;o.lane=e.lane;o.netSerial=e.serial;o.root.visible=true;o.root.position.set(e.lane*LANE_W,0,e.z);
+    }
+    // The cache may also cover the leading friend's distance. Derive OUR next wave.
+    wave=0;spawnAt=48;while(spawnAt<=distance){wave++;spawnAt+=Math.max(24,milestoneSpeed(spawnAt)*1.3);}
+    MP.serial=wave*2;
+  }
+  function mpRecoverFromPose(r,age) {
+    if(!MP.recovering||document.hidden||!MP.started||state!=='running'||age>.6||!Number.isFinite(r.distance)||!Number.isFinite(r.speed))return;
+    const served=Math.max(0,(MP.selfPenalty||0)-(MP.setbackLeft||0));
+    const otherServed=Math.max(0,(r.racePenalty||0)-(r.setbackLeft||0));
+    const forward=r.distance+r.speed*age-Math.min(r.setbackLeft||0,r.speed*.8*age);
+    distance=Math.max(distance,forward+otherServed-served);
+    speed=milestoneSpeed(distance+served);mpRebuildCourse();MP.hitGrace=Math.max(MP.hitGrace||0,1);
+    MP.recovering=false;MP.poseInitialized=false;lastNow=performance.now();mpSaveSession();
   }
   function mpTick(dt) {
     if(!MP.active||!MP.visuals)return;
@@ -2563,17 +2667,25 @@
     if(MP.remote&&MP.started&&state!=='paused'&&state!=='over') {
       const p=MP.otherG,r=MP.remote;
       const poseElapsed=(performance.now()-MP.receivedAt)/1000;
-      const age=Math.min(.3,(MP.remoteAge||0)+poseElapsed+(live?0:MP.rtt/2000));
+      const age=Math.min(.4,(MP.remoteAge||0)+poseElapsed);
       const pose=mpPredictPose(r,age);
-      p.x=damp(p.x,pose.x,22,dt);p.y=damp(p.y,pose.y,24,dt);p.vx=pose.vx;p.vy=pose.vy;
-      p.grounded=pose.grounded;p.slideT=pose.slideT;p.runBlend=r.run;p.phase=r.phase+Math.min(2,(MP.remoteAge||0)+poseElapsed)*(r.grounded?9+speed*.3:3);
-      MP.otherGenie.root.rotation.y=r.rotation;animateGenie(dt,MP.otherGenie,p,true);MP.otherGenie.body.rotation.x=r.pitch;
+      p.x=damp(p.x,pose.x,22,dt);p.y=damp(p.y,pose.y,24,dt);p.vx=damp(p.vx,pose.vx,16,dt);p.vy=damp(p.vy,pose.vy,16,dt);
+      p.grounded=pose.grounded&&p.y<.08;p.slideT=pose.slideT;p.runBlend=damp(p.runBlend,r.run,16,dt);
+      if(!MP.poseInitialized){p.phase=pose.phase;MP.poseInitialized=true;}
+      else{const advance=dt*r.run*(pose.grounded?9+r.speed*.3:3);p.phase+=advance;const error=Math.atan2(Math.sin(pose.phase-p.phase),Math.cos(pose.phase-p.phase));p.phase+=clamp(error*4*dt,-advance*.5,Math.max(advance*.5,dt));}
+      const yaw=MP.otherGenie.root.rotation.y;MP.otherGenie.root.rotation.y=yaw+Math.atan2(Math.sin(r.rotation-yaw),Math.cos(r.rotation-yaw))*(1-Math.exp(-18*dt));
+      animateGenie(dt,MP.otherGenie,p,true);MP.otherGenie.body.rotation.x=damp(MP.otherGenie.body.rotation.x,r.pitch,18,dt);
       const predictedDistance=r.distance+r.speed*age-Math.min(r.setbackLeft||0,r.speed*.8*age);
       MP.otherZ=damp(MP.otherZ||0,clamp((distance-predictedDistance)*.28,-10,5),8,dt);
       MP.otherGenie.root.position.z=MP.otherZ;MP.otherShadow.position.z=MP.otherZ;
       MP.otherShadow.position.x=p.x;MP.otherShadow.material.opacity=.62*(1-clamp(p.y/4,0,1)*.7);
+      MP.otherDistance=predictedDistance;
     }
-    obstacles.forEach((o,i)=>{const r=MP.otherObstacles[i];r.visible=o.active;r.position.copy(o.root.position);});
+    MP.otherObstacles.forEach(o=>o.visible=false);
+    if(MP.started){for(const e of mpCourseWindow(MP.otherDistance??distance)){
+      const i=obstacles.findIndex((o,i)=>o.typeIndex===e.type&&!MP.otherObstacles[i].visible);if(i<0)continue;
+      const root=MP.otherObstacles[i];root.visible=true;root.position.set(e.lane*LANE_W,0,e.z+(MP.otherZ||0));
+    }}
   }
   $('#friendBtn').addEventListener('click',()=>mpOpen());
   $('#friendReady').addEventListener('click',mpReady);
